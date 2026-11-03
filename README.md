@@ -13,6 +13,7 @@ Testado no **Redragon M916 PRO 1K** (dongle 2.4G e cabo).
   verde (normal), laranja (≤ 30%), vermelho (≤ 15%), azul (carregando)
 - Carregando: mostra um raio com o último nível real de antes do cabo. Enquanto carrega, a voltagem sobe e a porcentagem que o mouse informa fica inflada, então o app não usa esse número. Quando termina de carregar, aparece "F"
 - Avisa com notificação em 20% e em 10%
+- **Dispositivos Bluetooth** (teclados, controles, fones…): mostra a bateria que o próprio Windows já guarda, cada um com seu ícone, que tem a barra em cima. Você escolhe quais aparecem em botão direito → "Dispositivos Bluetooth". Testado com o teclado Anne Pro 2. Com o cabo ligado, o teclado sai do Bluetooth e o Windows para de atualizar a bateria dele, então o ícone mostra o último valor, que fica cinza depois de 1 dia sem atualizar
 - Clique no ícone para ver os detalhes: bateria, voltagem, tempo restante estimado, conexão (cabo/dongle), polling rate e nível de DPI ativo
 - Intervalo de atualização configurável: 5 s, 10 s, 30 s, 1 min ou 5 min
 - Opção "Iniciar com o Windows"
