@@ -350,165 +350,6 @@ static class Keyboard
     }
 }
 
-// ======================= Janela "Configurar mouse" =======================
-
-class SettingsForm : Form
-{
-    MouseSettings current;
-    NumericUpDown[] dpi = new NumericUpDown[MouseSettings.MaxLevels];
-    NumericUpDown levels;
-    ComboBox active, polling, lod, peak, profiles;
-    TextBox profileName;
-    Label status;
-    static readonly int[] PeakOptions = { 30, 60, 120, 300, 600, 900, 1200, 1800 };
-
-    public event Action ProfilesChanged;
-
-    public SettingsForm(MouseSettings s)
-    {
-        current = s;
-        Text = "Configurar mouse";
-        FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = MinimizeBox = false;
-        StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(430, 430);
-        Font = new Font("Segoe UI", 9);
-
-        int y = 12;
-        Add(new Label { Text = "Níveis de DPI:", Location = new Point(12, y + 3), AutoSize = true });
-        levels = new NumericUpDown { Minimum = 1, Maximum = MouseSettings.MaxLevels, Value = s.Levels, Location = new Point(150, y), Width = 60 };
-        levels.ValueChanged += delegate { UpdateLevels(); };
-        Add(levels);
-        y += 32;
-        for (int i = 0; i < MouseSettings.MaxLevels; i++)
-        {
-            int col = i % 2, row = i / 2;
-            Add(new Label { Text = "Nível " + (i + 1) + ":", Location = new Point(12 + col * 210, y + row * 30 + 3), AutoSize = true });
-            dpi[i] = new NumericUpDown { Minimum = 50, Maximum = 26000, Increment = 50, Value = Clamp(s.Dpi[i]),
-                Location = new Point(80 + col * 210, y + row * 30), Width = 90 };
-            Add(dpi[i]);
-        }
-        y += 4 * 30 + 6;
-        Add(new Label { Text = "Nível ativo:", Location = new Point(12, y + 3), AutoSize = true });
-        active = Combo(150, y, 80); Add(active);
-        y += 32;
-        Add(new Label { Text = "Polling (Report Rate):", Location = new Point(12, y + 3), AutoSize = true });
-        polling = Combo(150, y, 100);
-        foreach (int hz in MouseSettings.PollingOptions) polling.Items.Add(hz + " Hz");
-        polling.SelectedIndex = Math.Max(0, Array.IndexOf(MouseSettings.PollingOptions, s.Polling));
-        Add(polling);
-        y += 32;
-        Add(new Label { Text = "LOD (altura):", Location = new Point(12, y + 3), AutoSize = true });
-        lod = Combo(150, y, 100); lod.Items.Add("1 mm"); lod.Items.Add("2 mm");
-        lod.SelectedIndex = s.LodMm == 2 ? 1 : 0; Add(lod);
-        y += 32;
-        Add(new Label { Text = "Peak Performance:", Location = new Point(12, y + 3), AutoSize = true });
-        peak = Combo(150, y, 100);
-        var peaks = new List<int>(PeakOptions);
-        if (!peaks.Contains(s.PeakSeconds)) { peaks.Add(s.PeakSeconds); peaks.Sort(); }
-        foreach (int sec in peaks) peak.Items.Add(new PeakItem(sec));
-        peak.SelectedIndex = peaks.IndexOf(s.PeakSeconds);
-        Add(peak);
-        y += 40;
-
-        var apply = new Button { Text = "Aplicar no mouse", Location = new Point(12, y), Width = 140, Height = 28 };
-        apply.Click += delegate { ApplyToMouse(Collect()); };
-        Add(apply);
-        status = new Label { Location = new Point(160, y + 6), Width = 260, AutoSize = false, Height = 20 };
-        Add(status);
-        y += 44;
-
-        Add(new Label { Text = "Perfis:", Location = new Point(12, y + 3), AutoSize = true });
-        profiles = Combo(70, y, 150); Add(profiles);
-        var load = new Button { Text = "Aplicar", Location = new Point(228, y - 1), Width = 70 };
-        load.Click += delegate { LoadProfile(); };
-        Add(load);
-        var del = new Button { Text = "Excluir", Location = new Point(304, y - 1), Width = 70 };
-        del.Click += delegate
-        {
-            if (profiles.SelectedItem == null) return;
-            Profiles.Delete((string)profiles.SelectedItem); RefreshProfiles();
-            if (ProfilesChanged != null) ProfilesChanged();
-        };
-        Add(del);
-        y += 34;
-        profileName = new TextBox { Location = new Point(70, y), Width = 150 };
-        Add(profileName);
-        var save = new Button { Text = "Salvar como perfil", Location = new Point(228, y - 1), Width = 146 };
-        save.Click += delegate
-        {
-            string name = profileName.Text.Trim();
-            if (name.Length == 0) { status.Text = "Digite um nome para o perfil."; return; }
-            Profiles.Save(name, Collect().Serialize()); RefreshProfiles(); profiles.SelectedItem = name;
-            status.Text = "Perfil \"" + name + "\" salvo.";
-            if (ProfilesChanged != null) ProfilesChanged();
-        };
-        Add(save);
-
-        UpdateLevels();
-        active.SelectedIndex = Math.Min(s.Active, s.Levels) - 1;
-        RefreshProfiles();
-    }
-
-    class PeakItem
-    {
-        public int Seconds; public PeakItem(int s) { Seconds = s; }
-        public override string ToString() { return Seconds < 60 ? Seconds + " s" : (Seconds / 60) + " min"; }
-    }
-
-    static decimal Clamp(int v) { return Math.Max(50, Math.Min(26000, v)); }
-    void Add(Control c) { Controls.Add(c); }
-    static ComboBox Combo(int x, int y, int w) { return new ComboBox { Location = new Point(x, y), Width = w, DropDownStyle = ComboBoxStyle.DropDownList }; }
-
-    void UpdateLevels()
-    {
-        int n = (int)levels.Value;
-        for (int i = 0; i < dpi.Length; i++) dpi[i].Enabled = i < n;
-        int sel = active.SelectedIndex;
-        active.Items.Clear();
-        for (int i = 1; i <= n; i++) active.Items.Add("Nível " + i);
-        active.SelectedIndex = Math.Max(0, Math.Min(sel, n - 1));
-    }
-
-    void RefreshProfiles()
-    {
-        profiles.Items.Clear();
-        foreach (string p in Profiles.Names()) profiles.Items.Add(p);
-        if (profiles.Items.Count > 0) profiles.SelectedIndex = 0;
-    }
-
-    MouseSettings Collect()
-    {
-        var s = current.Copy();
-        s.Levels = (int)levels.Value;
-        for (int i = 0; i < dpi.Length; i++) s.Dpi[i] = (int)dpi[i].Value / 50 * 50;
-        s.Active = active.SelectedIndex + 1;
-        s.Polling = MouseSettings.PollingOptions[polling.SelectedIndex];
-        s.LodMm = lod.SelectedIndex + 1;
-        s.PeakSeconds = ((PeakItem)peak.SelectedItem).Seconds;
-        return s;
-    }
-
-    void LoadProfile()
-    {
-        if (profiles.SelectedItem == null) return;
-        var s = current.WithProfile(Profiles.Get((string)profiles.SelectedItem));
-        if (s == null) { status.Text = "Perfil inválido."; return; }
-        ApplyToMouse(s);
-        if (status.Text.StartsWith("Aplicado")) Close();
-    }
-
-    void ApplyToMouse(MouseSettings s)
-    {
-        Cursor = Cursors.WaitCursor;
-        status.Text = "Gravando…"; status.Refresh();
-        string err = App.ApplySettings(current, s);
-        Cursor = Cursors.Default;
-        if (err == null) status.Text = "Mouse não respondeu. Ele está ligado?";
-        else if (err.Length > 0) status.Text = "Falhou: " + err;
-        else { status.Text = "Aplicado e conferido ✓"; current = s; }
-    }
-}
-
 // Perfis guardados no registro do usuário.
 static class Profiles
 {
@@ -613,6 +454,7 @@ class App : ApplicationContext
     volatile bool busy;
 
     MouseReading mouse;
+    bool mouseOnline;
     int mouseRealPct = -1; DateTime mouseRealTime; // último nível real (sem cabo)
     bool warned20, warned10;
     DateTime dischargeStart; int dischargeStartPct = -1;
@@ -622,7 +464,7 @@ class App : ApplicationContext
     ToolStripMenuItem btMenu = new ToolStripMenuItem("Dispositivos Bluetooth");
     ToolStripMenuItem profilesMenu = new ToolStripMenuItem("Perfis do mouse");
     ToolStripMenuItem keyboardMenu = new ToolStripMenuItem("Cor do teclado (Anne Pro 2)");
-    SettingsForm settingsForm;
+    SettingsWindow settingsForm;
     Dictionary<string, NotifyIcon> btTrays = new Dictionary<string, NotifyIcon>();
     List<BtDevice> bt = new List<BtDevice>();
     HashSet<string> btWarned = new HashSet<string>();
@@ -633,7 +475,11 @@ class App : ApplicationContext
         ui.CreateControl();
         LoadSaved();
 
-        menu.Items.Add("Detalhes…", null, delegate { ShowDetails(); });
+        menu.Renderer = new ThemedRenderer();
+        ToolStripManager.Renderer = menu.Renderer;
+        menu.Font = Theme.Font(9.5f);
+        var open = menu.Items.Add("Abrir painel", null, delegate { ShowDetails(); });
+        open.Font = Theme.Semibold(9.5f);
         menu.Items.Add("Atualizar agora", null, delegate { RefreshMouse(); RefreshBt(); });
         btMenu.DropDownItems.Add("(nenhum)");
         btMenu.DropDownOpening += delegate { BuildBtMenu(); };
@@ -707,7 +553,7 @@ class App : ApplicationContext
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
-        settingsForm = new SettingsForm(s);
+        settingsForm = new SettingsWindow(s);
         settingsForm.FormClosed += delegate { RefreshMouse(); };
         settingsForm.Show();
     }
@@ -805,6 +651,7 @@ class App : ApplicationContext
         }
         foreach (var id in new List<string>(btTrays.Keys))
             if (!seen.Contains(id)) { btTrays[id].Visible = false; btTrays[id].Dispose(); btTrays.Remove(id); }
+        UpdateFlyout();
     }
 
     bool IsShown(BtDevice d)
@@ -859,6 +706,12 @@ class App : ApplicationContext
     }
 
     void OnMouse(MouseReading r)
+    {
+        mouseOnline = r.Ok;
+        try { Update(r); } finally { UpdateFlyout(); }
+    }
+
+    void Update(MouseReading r)
     {
         if (!r.Ok)
         {
@@ -918,34 +771,83 @@ class App : ApplicationContext
 
     // ---------- detalhes ----------
 
+    // Painel que abre ao clicar no ícone: um cartão por dispositivo.
+    Flyout flyout;
+    DateTime flyoutClosed;
+
     void ShowDetails()
     {
-        var sb = new StringBuilder();
-        sb.AppendLine("MOUSE");
-        if (mouse == null) sb.AppendLine("Sem leitura. O mouse está ligado?");
+        if (flyout != null && !flyout.IsDisposed) { flyout.Close(); return; }
+        if ((DateTime.Now - flyoutClosed).TotalMilliseconds < 300) return; // o clique que fechou o painel
+        flyout = new Flyout();
+        flyout.SettingsClicked += delegate { flyout.Close(); OpenSettings(); };
+        flyout.RefreshClicked += delegate { RefreshMouse(); RefreshBt(); };
+        flyout.MoreClicked += delegate
+        {
+            var at = Cursor.Position; flyout.Close();
+            menu.Show(at, ToolStripDropDownDirection.AboveLeft);
+        };
+        flyout.FormClosed += delegate { flyoutClosed = DateTime.Now; };
+        UpdateFlyout();
+        flyout.Show();
+    }
+
+    void UpdateFlyout()
+    {
+        if (flyout == null || flyout.IsDisposed) return;
+        flyout.SetCards(BuildCards(), "Atualiza a cada " + (timer.Interval / 1000 < 60 ? timer.Interval / 1000 + " s" : timer.Interval / 60000 + " min") +
+            (mouse != null ? " · última leitura " + mouse.Time.ToString("HH:mm:ss") : ""));
+    }
+
+    List<DeviceCard> BuildCards()
+    {
+        var list = new List<DeviceCard>();
+        var m = new DeviceCard { Glyph = "", Name = "Redragon M916 PRO" };
+        if (mouse == null || !mouseOnline)
+        {
+            m.Percent = mouseRealPct; m.Stale = true;
+            m.Status = "Desligado ou dormindo";
+            m.Detail = mouseRealPct >= 0 ? "Último nível conhecido: " + mouseRealPct + "%" : "Mexa o mouse para ele acordar";
+        }
         else
         {
+            m.Charging = mouse.Charging;
             if (mouse.Charging)
-                sb.AppendLine("Bateria:\t" + (mouse.Percent >= 100 ? "carregado" : "carregando") +
-                    (mouseRealPct >= 0 ? " (antes do cabo: " + mouseRealPct + "%)" : ""));
-            else sb.AppendLine("Bateria:\t" + mouse.Percent + "%");
-            sb.AppendLine("Voltagem:\t" + (mouse.MilliVolts / 1000.0).ToString("0.000") + " V" + (mouse.Charging ? " (com carga)" : ""));
-            string rem = Remaining();
-            if (rem != null) sb.AppendLine("Restante:\t" + rem);
-            sb.AppendLine("Conexão:\t" + (mouse.Wired ? "Cabo USB" : "Dongle 2.4G"));
-            if (mouse.PollingHz > 0) sb.AppendLine("Polling:\t" + mouse.PollingHz + " Hz");
-            if (mouse.DpiLevels > 0) sb.AppendLine("DPI:\tnível " + mouse.DpiLevel + " de " + mouse.DpiLevels);
-            sb.AppendLine("Leitura:\t" + mouse.Time.ToString("HH:mm:ss") + " (a cada " + timer.Interval / 1000 + " s)");
+            {
+                m.Percent = mouse.Percent >= 100 ? 100 : mouseRealPct;
+                m.Status = mouse.Percent >= 100 ? "Carregado" : "Carregando" + (mouseRealPct >= 0 ? " · antes do cabo " + mouseRealPct + "%" : "");
+            }
+            else
+            {
+                m.Percent = mouse.Percent;
+                string rem = Remaining();
+                m.Status = rem == null ? "Em uso" : rem.StartsWith("~") ? rem + " restantes" : "Tempo restante: " + rem;
+            }
+            var parts = new List<string> { mouse.Wired ? "Cabo USB" : "Dongle 2.4G" };
+            if (mouse.PollingHz > 0) parts.Add(mouse.PollingHz + " Hz");
+            if (mouse.DpiLevels > 0) parts.Add("DPI " + mouse.DpiLevel + "/" + mouse.DpiLevels);
+            parts.Add((mouse.MilliVolts / 1000.0).ToString("0.00") + " V");
+            m.Detail = string.Join("  ·  ", parts.ToArray());
         }
+        list.Add(m);
+
         foreach (var d in bt)
         {
             if (!IsShown(d)) continue;
-            sb.AppendLine();
-            sb.AppendLine(d.Name.ToUpperInvariant() + " (Bluetooth)");
-            sb.AppendLine("Bateria:\t" + (d.Charging ? "carregando" : d.Percent + "%"));
-            sb.AppendLine("Atualizado:\t" + When(d.Updated));
+            string cat = (d.Category + " " + d.Name).ToLowerInvariant();
+            var c = new DeviceCard
+            {
+                Name = d.Name, Percent = d.Percent, Charging = d.Charging,
+                Stale = (DateTime.Now - d.Updated).TotalHours > 24,
+                Glyph = cat.Contains("keyboard") || d.Name == "AP2" ? "" :
+                        cat.Contains("gam") || cat.Contains("controller") || cat.Contains("8bitdo") ? "" :
+                        cat.Contains("audio") || cat.Contains("head") || cat.Contains("buds") ? "" : "",
+            };
+            c.Status = d.Charging ? "Carregando" : c.Stale ? "Sem conexão recente" : "Bluetooth";
+            c.Detail = "Atualizado " + When(d.Updated);
+            list.Add(c);
         }
-        MessageBox.Show(sb.ToString(), "Bateria dos dispositivos", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        return list;
     }
 
     static void SetIcon(NotifyIcon tray, Icon icon, string tip)
@@ -1024,6 +926,26 @@ class App : ApplicationContext
             return;
         }
         if (args.Length > 1 && args[0] == "--icons") { Icons.Preview(args[1]); return; }
+        if (args.Length > 1 && args[0] == "--preview")
+        {
+            // Desenha o painel e a janela de configuração em PNG, para conferir o visual.
+            var cards = new List<DeviceCard> {
+                new DeviceCard { Glyph = "", Name = "Redragon M916 PRO", Percent = 82, Status = "~31 horas restantes", Detail = "Dongle 2.4G  ·  1000 Hz  ·  DPI 3/5  ·  4.02 V" },
+                new DeviceCard { Glyph = "", Name = "AP2", Percent = 100, Status = "Bluetooth", Detail = "Atualizado hoje 13:53" },
+                new DeviceCard { Glyph = "", Name = "8BitDo Ultimate 2C Wireless", Percent = 6, Stale = true, Status = "Sem conexão recente", Detail = "Atualizado 14/10 00:06" },
+                new DeviceCard { Glyph = "", Name = "Mouse carregando (exemplo)", Percent = 65, Charging = true, Status = "Carregando · antes do cabo 65%", Detail = "Cabo USB  ·  1000 Hz" } };
+            Action<Form, string> snap = (f, name) =>
+            {
+                f.StartPosition = FormStartPosition.Manual;
+                f.Show(); f.Location = new Point(-5000, 0); Application.DoEvents(); Thread.Sleep(300); Application.DoEvents();
+                using (var bmp = new Bitmap(f.Width, f.Height)) { f.DrawToBitmap(bmp, new Rectangle(0, 0, f.Width, f.Height)); bmp.Save(args[1] + name); }
+            };
+            var fl = new Flyout(); fl.SetCards(cards, "Atualiza a cada 10 s · última leitura 17:58:02");
+            snap(fl, "-painel.png");
+            var st = Mouse.With(m => MouseSettings.Read(m)) ?? new MouseSettings();
+            snap(new SettingsWindow(st), "-config.png");
+            return;
+        }
         if (args.Length > 0 && args[0] == "--settings")
         {
             var s = Mouse.With(m => MouseSettings.Read(m));
