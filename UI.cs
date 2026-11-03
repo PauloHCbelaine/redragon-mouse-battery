@@ -460,7 +460,14 @@ class Flyout : Form
         refresh.Click += delegate { if (RefreshClicked != null) RefreshClicked(); };
         more.Click += delegate { if (MoreClicked != null) MoreClicked(); };
         Controls.Add(settings); Controls.Add(refresh); Controls.Add(more);
-        fade.Tick += delegate { Opacity = Math.Min(1, Opacity + 0.15); if (Opacity >= 1) fade.Stop(); };
+        fade.Tick += delegate
+        {
+            // O painel pode ter fechado no meio da animação (clique fora logo ao abrir).
+            if (IsDisposed || Disposing) { fade.Stop(); return; }
+            Opacity = Math.Min(1, Opacity + 0.15);
+            if (Opacity >= 1) fade.Stop();
+        };
+        FormClosed += delegate { fade.Stop(); fade.Dispose(); };
         KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) Close(); };
         Deactivate += delegate { Close(); };
     }

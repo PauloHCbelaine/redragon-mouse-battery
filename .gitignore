@@ -2,3 +2,4 @@ node_modules/
 *.exe
 teste.txt
 tools/*-log.txt
+erros.log

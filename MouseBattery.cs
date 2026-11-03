@@ -957,6 +957,17 @@ class App : ApplicationContext
         using (new Mutex(true, AppName, out isNew))
         {
             if (!isNew) return; // já está rodando
+            // Erro inesperado na interface: registra em erros.log e segue funcionando, sem janela de erro.
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (s, e) =>
+            {
+                try
+                {
+                    File.AppendAllText(Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "erros.log"),
+                        DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " " + e.Exception + "\r\n\r\n");
+                }
+                catch { }
+            };
             Application.EnableVisualStyles();
             Application.Run(new App());
         }
