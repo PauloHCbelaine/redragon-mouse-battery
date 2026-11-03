@@ -78,29 +78,82 @@ class Mouse : IDisposable
     public Mouse(SafeFileHandle h) { fs = new FileStream(h, FileAccess.ReadWrite, 17, true); }
     public void Dispose() { fs.Dispose(); }
 
-    // cmd 0x04 = bateria; cmd 0x08 = ler `len` bytes da memória de configuração em `addr`.
-    public byte[] Query(byte cmd, int addr, int len)
+    // Um pedido por vez para o mouse, mesmo vindo de lugares diferentes do app.
+    static readonly object Busy = new object();
+
+    // cmd 0x04 = bateria; 0x08 = ler `len` bytes da memória em `addr`; 0x07 = gravar `data` em `addr`.
+    public byte[] Query(byte cmd, int addr, int len, byte[] data = null)
     {
         var req = new byte[17];
-        req[0] = 0x08; req[1] = cmd; req[3] = (byte)(addr >> 8); req[4] = (byte)addr; req[5] = (byte)len;
+        req[0] = 0x08; req[1] = cmd; req[3] = (byte)(addr >> 8); req[4] = (byte)addr;
+        req[5] = (byte)(data != null ? data.Length : len);
+        if (data != null) Array.Copy(data, 0, req, 6, data.Length);
         int sum = 0; for (int i = 0; i < 16; i++) sum += req[i];
         req[16] = (byte)((0x55 - sum) & 0xFF);
 
-        for (int attempt = 0; attempt < 3; attempt++)
+        lock (Busy)
         {
-            fs.Write(req, 0, 17);
-            DateTime end = DateTime.Now.AddMilliseconds(400);
-            while (DateTime.Now < end)
+            for (int attempt = 0; attempt < 3; attempt++)
             {
-                var buf = new byte[17];
-                IAsyncResult ar = fs.BeginRead(buf, 0, 17, null, null);
-                TimeSpan left = end - DateTime.Now;
-                if (left < TimeSpan.Zero || !ar.AsyncWaitHandle.WaitOne(left)) return null; // fechar o handle cancela a leitura
-                int n = fs.EndRead(ar);
-                if (n >= 17 && buf[0] == 0x08 && buf[1] == cmd && buf[2] == 0 &&
-                    (cmd != 0x08 || (buf[3] == req[3] && buf[4] == req[4])))
-                    return buf;
+                fs.Write(req, 0, 17);
+                DateTime end = DateTime.Now.AddMilliseconds(400);
+                while (DateTime.Now < end)
+                {
+                    var buf = new byte[17];
+                    IAsyncResult ar = fs.BeginRead(buf, 0, 17, null, null);
+                    TimeSpan left = end - DateTime.Now;
+                    if (left < TimeSpan.Zero || !ar.AsyncWaitHandle.WaitOne(left)) return null; // fechar o handle cancela a leitura
+                    int n = fs.EndRead(ar);
+                    if (n >= 17 && buf[0] == 0x08 && buf[1] == cmd && buf[2] == 0 &&
+                        (cmd != 0x08 && cmd != 0x07 || (buf[3] == req[3] && buf[4] == req[4])))
+                        return buf;
+                }
             }
+        }
+        return null;
+    }
+
+    public byte[] ReadMem(int addr, int len)
+    {
+        byte[] r = Query(0x08, addr, len);
+        if (r == null) return null;
+        var d = new byte[len]; Array.Copy(r, 6, d, 0, len); return d;
+    }
+
+    // Grava e confere lendo de volta.
+    public bool WriteMem(int addr, byte[] data)
+    {
+        if (Query(0x07, addr, 0, data) == null) return false;
+        byte[] back = ReadMem(addr, data.Length);
+        if (back == null) return false;
+        for (int i = 0; i < data.Length; i++) if (back[i] != data[i]) return false;
+        return true;
+    }
+
+    // Valor simples gravado em par com o byte de verificação (0x55 - valor).
+    public static byte[] Pair(int v) { return new[] { (byte)v, (byte)((0x55 - v) & 0xFF) }; }
+
+    // Abre o mouse (dongle primeiro) e executa `work`. Devolve null se o mouse não responder.
+    public static T With<T>(Func<Mouse, T> work) where T : class
+    {
+        var paths = Hid.FindPaths("vid_3554", "mi_01", "col05");
+        paths.Sort((a, b) => (b.Contains("pid_f5d5") ? 1 : 0) - (a.Contains("pid_f5d5") ? 1 : 0));
+        foreach (string p in paths)
+        {
+            try
+            {
+                using (var h = Hid.Open(p))
+                {
+                    if (h.IsInvalid) continue;
+                    using (var m = new Mouse(h))
+                    {
+                        if (m.Query(0x04, 0, 0) == null) continue; // não está respondendo por este caminho
+                        T result = work(m);
+                        if (result != null) return result;
+                    }
+                }
+            }
+            catch { }
         }
         return null;
     }
@@ -152,6 +205,90 @@ class Mouse : IDisposable
     }
 }
 
+// Configurações do mouse. Endereços confirmados no M916 PRO 1K comparando a memória
+// antes/depois de mudar cada opção no driver oficial da Redragon.
+class MouseSettings
+{
+    public const int MaxLevels = 8;
+    public int Polling = 1000;           // 0x0000
+    public int Levels = 5, Active = 1;   // 0x0002 (quantidade), 0x0004 (ativo, 1..N)
+    public int LodMm = 1;                // 0x000A (1 ou 2 mm)
+    public int PeakSeconds = 30;         // 0x00B7 (em unidades de 10 s)
+    public int[] Dpi = new int[MaxLevels]; // 0x000C + 4*i
+    byte[] dpiRaw = new byte[MaxLevels * 4];
+
+    public static readonly int[] PollingOptions = { 125, 250, 500, 1000 };
+    static int PollCode(int hz) { return hz == 125 ? 0x08 : hz == 250 ? 0x04 : hz == 500 ? 0x02 : 0x01; }
+    static int PollHz(int code) { return code == 0x08 ? 125 : code == 0x04 ? 250 : code == 0x02 ? 500 : 1000; }
+
+    // DPI = (código + 1) × 50. Os 2 bits altos do código vão no 3º byte (bits 2-3 do X e do Y).
+    static int DecodeDpi(byte lo, byte nib) { return ((((nib >> 2) & 3) << 8 | lo) + 1) * 50; }
+    static byte[] EncodeDpi(int dpi, byte oldNib)
+    {
+        int v = Math.Max(0, Math.Min(519, dpi / 50 - 1));
+        byte lo = (byte)(v & 0xFF);
+        int hi = (v >> 8) & 3;
+        byte nib = (byte)((oldNib & 0x33) | (hi << 2) | (hi << 6));
+        return new[] { lo, lo, nib, (byte)((0x55 - lo - lo - nib) & 0xFF) };
+    }
+
+    public static MouseSettings Read(Mouse m)
+    {
+        var s = new MouseSettings();
+        byte[] a = m.ReadMem(0x0000, 6), lod = m.ReadMem(0x000A, 2), peak = m.ReadMem(0x00B7, 2);
+        if (a == null || lod == null || peak == null) return null;
+        s.Polling = PollHz(a[0]); s.Levels = a[2]; s.Active = a[4] + 1;
+        s.LodMm = lod[0]; s.PeakSeconds = peak[0] * 10;
+        for (int i = 0; i < MaxLevels; i += 2)
+        {
+            byte[] w = m.ReadMem(0x000C + 4 * i, 8);
+            if (w == null) return null;
+            Array.Copy(w, 0, s.dpiRaw, 4 * i, 8);
+        }
+        for (int i = 0; i < MaxLevels; i++) s.Dpi[i] = DecodeDpi(s.dpiRaw[4 * i], s.dpiRaw[4 * i + 2]);
+        if (s.Levels < 1 || s.Levels > MaxLevels || s.Active > s.Levels) return null;
+        return s;
+    }
+
+    // Grava só o que mudou em relação a `old`. Devolve o que falhou ("" = tudo certo).
+    public string Apply(Mouse m, MouseSettings old)
+    {
+        var errors = new List<string>();
+        for (int i = 0; i < MaxLevels; i++)
+            if (i < Levels && Dpi[i] != old.Dpi[i] && !m.WriteMem(0x000C + 4 * i, EncodeDpi(Dpi[i], old.dpiRaw[4 * i + 2])))
+                errors.Add("DPI " + (i + 1));
+        if (Levels != old.Levels && !m.WriteMem(0x0002, Mouse.Pair(Levels))) errors.Add("quantidade de níveis");
+        if (Active != old.Active && !m.WriteMem(0x0004, Mouse.Pair(Active - 1))) errors.Add("nível ativo");
+        if (Polling != old.Polling && !m.WriteMem(0x0000, Mouse.Pair(PollCode(Polling)))) errors.Add("polling");
+        if (LodMm != old.LodMm && !m.WriteMem(0x000A, Mouse.Pair(LodMm))) errors.Add("LOD");
+        if (PeakSeconds != old.PeakSeconds && !m.WriteMem(0x00B7, Mouse.Pair(PeakSeconds / 10))) errors.Add("Peak Performance");
+        return string.Join(", ", errors.ToArray());
+    }
+
+    public MouseSettings Copy() { var c = (MouseSettings)MemberwiseClone(); c.Dpi = (int[])Dpi.Clone(); c.dpiRaw = (byte[])dpiRaw.Clone(); return c; }
+
+    // Perfil salvo como texto: polling|níveis|ativo|lod|peak|dpi1,dpi2,...
+    public string Serialize()
+    {
+        var d = new string[Levels]; for (int i = 0; i < Levels; i++) d[i] = Dpi[i].ToString();
+        return Polling + "|" + Levels + "|" + Active + "|" + LodMm + "|" + PeakSeconds + "|" + string.Join(",", d);
+    }
+
+    // Aplica um perfil por cima das configurações atuais (mantém os bytes que o perfil não guarda).
+    public MouseSettings WithProfile(string text)
+    {
+        var p = text.Split('|');
+        if (p.Length < 6) return null;
+        var s = Copy();
+        s.Polling = int.Parse(p[0]); s.Levels = int.Parse(p[1]); s.Active = int.Parse(p[2]);
+        s.LodMm = int.Parse(p[3]); s.PeakSeconds = int.Parse(p[4]);
+        var d = p[5].Split(',');
+        for (int i = 0; i < d.Length && i < MaxLevels; i++) s.Dpi[i] = int.Parse(d[i]);
+        if (s.Levels < 1 || s.Levels > MaxLevels || s.Active < 1 || s.Active > s.Levels) return null;
+        return s;
+    }
+}
+
 class MouseReading
 {
     // Percent é o que o mouse informa. Enquanto carrega, a voltagem sobe e esse valor fica
@@ -160,6 +297,234 @@ class MouseReading
     public int PollingHz;
     public int DpiLevel, DpiLevels;
     public DateTime Time = DateTime.Now;
+}
+
+// ======================= Teclado Anne Pro 2 (cabo USB) =======================
+
+// Cor única para todas as teclas, com o comando que o Annemone descobriu no ObinsKit
+// (github.com/illixion/Annemone). Só funciona com o teclado no cabo USB (interface 1).
+static class Keyboard
+{
+    [StructLayout(LayoutKind.Sequential)]
+    struct CAPS
+    {
+        public ushort Usage, UsagePage, InLen, OutLen, FeatLen;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 17)] public ushort[] r;
+        public ushort n1, n2, n3, n4, n5, n6, n7, n8, n9, n10;
+    }
+    [DllImport("hid.dll")] static extern bool HidD_GetPreparsedData(SafeFileHandle h, out IntPtr p);
+    [DllImport("hid.dll")] static extern bool HidD_FreePreparsedData(IntPtr p);
+    [DllImport("hid.dll")] static extern int HidP_GetCaps(IntPtr p, out CAPS c);
+
+    static readonly string[] Pids = { "pid_8008", "pid_8009", "pid_a292", "pid_a293" };
+
+    static string FindPath()
+    {
+        foreach (string p in Hid.FindPaths("vid_04d9", "mi_01"))
+            foreach (string pid in Pids) if (p.Contains(pid)) return p;
+        return null;
+    }
+
+    public static bool Connected { get { return FindPath() != null; } }
+
+    public static bool SetColor(Color c)
+    {
+        string path = FindPath();
+        if (path == null) return false;
+        byte[] msg = { 0, 123, 16, 65, 16, 7, 0, 0, 125, 32, 3, 255, 1, c.R, c.G, c.B };
+        using (var h = Hid.Open(path))
+        {
+            if (h.IsInvalid) return false;
+            int len = 65;
+            IntPtr pp;
+            if (HidD_GetPreparsedData(h, out pp))
+            {
+                CAPS caps; if (HidP_GetCaps(pp, out caps) == 0x110000 && caps.OutLen > 0) len = caps.OutLen;
+                HidD_FreePreparsedData(pp);
+            }
+            var buf = new byte[Math.Max(len, msg.Length)];
+            Array.Copy(msg, buf, msg.Length);
+            using (var fs = new FileStream(h, FileAccess.ReadWrite, buf.Length, true)) fs.Write(buf, 0, buf.Length);
+        }
+        return true;
+    }
+}
+
+// ======================= Janela "Configurar mouse" =======================
+
+class SettingsForm : Form
+{
+    MouseSettings current;
+    NumericUpDown[] dpi = new NumericUpDown[MouseSettings.MaxLevels];
+    NumericUpDown levels;
+    ComboBox active, polling, lod, peak, profiles;
+    TextBox profileName;
+    Label status;
+    static readonly int[] PeakOptions = { 30, 60, 120, 300, 600, 900, 1200, 1800 };
+
+    public event Action ProfilesChanged;
+
+    public SettingsForm(MouseSettings s)
+    {
+        current = s;
+        Text = "Configurar mouse";
+        FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = MinimizeBox = false;
+        StartPosition = FormStartPosition.CenterScreen;
+        ClientSize = new Size(430, 430);
+        Font = new Font("Segoe UI", 9);
+
+        int y = 12;
+        Add(new Label { Text = "Níveis de DPI:", Location = new Point(12, y + 3), AutoSize = true });
+        levels = new NumericUpDown { Minimum = 1, Maximum = MouseSettings.MaxLevels, Value = s.Levels, Location = new Point(150, y), Width = 60 };
+        levels.ValueChanged += delegate { UpdateLevels(); };
+        Add(levels);
+        y += 32;
+        for (int i = 0; i < MouseSettings.MaxLevels; i++)
+        {
+            int col = i % 2, row = i / 2;
+            Add(new Label { Text = "Nível " + (i + 1) + ":", Location = new Point(12 + col * 210, y + row * 30 + 3), AutoSize = true });
+            dpi[i] = new NumericUpDown { Minimum = 50, Maximum = 26000, Increment = 50, Value = Clamp(s.Dpi[i]),
+                Location = new Point(80 + col * 210, y + row * 30), Width = 90 };
+            Add(dpi[i]);
+        }
+        y += 4 * 30 + 6;
+        Add(new Label { Text = "Nível ativo:", Location = new Point(12, y + 3), AutoSize = true });
+        active = Combo(150, y, 80); Add(active);
+        y += 32;
+        Add(new Label { Text = "Polling (Report Rate):", Location = new Point(12, y + 3), AutoSize = true });
+        polling = Combo(150, y, 100);
+        foreach (int hz in MouseSettings.PollingOptions) polling.Items.Add(hz + " Hz");
+        polling.SelectedIndex = Math.Max(0, Array.IndexOf(MouseSettings.PollingOptions, s.Polling));
+        Add(polling);
+        y += 32;
+        Add(new Label { Text = "LOD (altura):", Location = new Point(12, y + 3), AutoSize = true });
+        lod = Combo(150, y, 100); lod.Items.Add("1 mm"); lod.Items.Add("2 mm");
+        lod.SelectedIndex = s.LodMm == 2 ? 1 : 0; Add(lod);
+        y += 32;
+        Add(new Label { Text = "Peak Performance:", Location = new Point(12, y + 3), AutoSize = true });
+        peak = Combo(150, y, 100);
+        var peaks = new List<int>(PeakOptions);
+        if (!peaks.Contains(s.PeakSeconds)) { peaks.Add(s.PeakSeconds); peaks.Sort(); }
+        foreach (int sec in peaks) peak.Items.Add(new PeakItem(sec));
+        peak.SelectedIndex = peaks.IndexOf(s.PeakSeconds);
+        Add(peak);
+        y += 40;
+
+        var apply = new Button { Text = "Aplicar no mouse", Location = new Point(12, y), Width = 140, Height = 28 };
+        apply.Click += delegate { ApplyToMouse(Collect()); };
+        Add(apply);
+        status = new Label { Location = new Point(160, y + 6), Width = 260, AutoSize = false, Height = 20 };
+        Add(status);
+        y += 44;
+
+        Add(new Label { Text = "Perfis:", Location = new Point(12, y + 3), AutoSize = true });
+        profiles = Combo(70, y, 150); Add(profiles);
+        var load = new Button { Text = "Aplicar", Location = new Point(228, y - 1), Width = 70 };
+        load.Click += delegate { LoadProfile(); };
+        Add(load);
+        var del = new Button { Text = "Excluir", Location = new Point(304, y - 1), Width = 70 };
+        del.Click += delegate
+        {
+            if (profiles.SelectedItem == null) return;
+            Profiles.Delete((string)profiles.SelectedItem); RefreshProfiles();
+            if (ProfilesChanged != null) ProfilesChanged();
+        };
+        Add(del);
+        y += 34;
+        profileName = new TextBox { Location = new Point(70, y), Width = 150 };
+        Add(profileName);
+        var save = new Button { Text = "Salvar como perfil", Location = new Point(228, y - 1), Width = 146 };
+        save.Click += delegate
+        {
+            string name = profileName.Text.Trim();
+            if (name.Length == 0) { status.Text = "Digite um nome para o perfil."; return; }
+            Profiles.Save(name, Collect().Serialize()); RefreshProfiles(); profiles.SelectedItem = name;
+            status.Text = "Perfil \"" + name + "\" salvo.";
+            if (ProfilesChanged != null) ProfilesChanged();
+        };
+        Add(save);
+
+        UpdateLevels();
+        active.SelectedIndex = Math.Min(s.Active, s.Levels) - 1;
+        RefreshProfiles();
+    }
+
+    class PeakItem
+    {
+        public int Seconds; public PeakItem(int s) { Seconds = s; }
+        public override string ToString() { return Seconds < 60 ? Seconds + " s" : (Seconds / 60) + " min"; }
+    }
+
+    static decimal Clamp(int v) { return Math.Max(50, Math.Min(26000, v)); }
+    void Add(Control c) { Controls.Add(c); }
+    static ComboBox Combo(int x, int y, int w) { return new ComboBox { Location = new Point(x, y), Width = w, DropDownStyle = ComboBoxStyle.DropDownList }; }
+
+    void UpdateLevels()
+    {
+        int n = (int)levels.Value;
+        for (int i = 0; i < dpi.Length; i++) dpi[i].Enabled = i < n;
+        int sel = active.SelectedIndex;
+        active.Items.Clear();
+        for (int i = 1; i <= n; i++) active.Items.Add("Nível " + i);
+        active.SelectedIndex = Math.Max(0, Math.Min(sel, n - 1));
+    }
+
+    void RefreshProfiles()
+    {
+        profiles.Items.Clear();
+        foreach (string p in Profiles.Names()) profiles.Items.Add(p);
+        if (profiles.Items.Count > 0) profiles.SelectedIndex = 0;
+    }
+
+    MouseSettings Collect()
+    {
+        var s = current.Copy();
+        s.Levels = (int)levels.Value;
+        for (int i = 0; i < dpi.Length; i++) s.Dpi[i] = (int)dpi[i].Value / 50 * 50;
+        s.Active = active.SelectedIndex + 1;
+        s.Polling = MouseSettings.PollingOptions[polling.SelectedIndex];
+        s.LodMm = lod.SelectedIndex + 1;
+        s.PeakSeconds = ((PeakItem)peak.SelectedItem).Seconds;
+        return s;
+    }
+
+    void LoadProfile()
+    {
+        if (profiles.SelectedItem == null) return;
+        var s = current.WithProfile(Profiles.Get((string)profiles.SelectedItem));
+        if (s == null) { status.Text = "Perfil inválido."; return; }
+        ApplyToMouse(s);
+        if (status.Text.StartsWith("Aplicado")) Close();
+    }
+
+    void ApplyToMouse(MouseSettings s)
+    {
+        Cursor = Cursors.WaitCursor;
+        status.Text = "Gravando…"; status.Refresh();
+        string err = App.ApplySettings(current, s);
+        Cursor = Cursors.Default;
+        if (err == null) status.Text = "Mouse não respondeu. Ele está ligado?";
+        else if (err.Length > 0) status.Text = "Falhou: " + err;
+        else { status.Text = "Aplicado e conferido ✓"; current = s; }
+    }
+}
+
+// Perfis guardados no registro do usuário.
+static class Profiles
+{
+    const string Key = @"Software\MouseBatteryRedragon\Profiles";
+    public static string[] Names()
+    {
+        using (var k = Registry.CurrentUser.OpenSubKey(Key))
+        {
+            var n = k == null ? new string[0] : k.GetValueNames();
+            Array.Sort(n, StringComparer.CurrentCultureIgnoreCase);
+            return n;
+        }
+    }
+    public static string Get(string name) { using (var k = Registry.CurrentUser.OpenSubKey(Key)) return k == null ? null : k.GetValue(name) as string; }
+    public static void Save(string name, string data) { using (var k = Registry.CurrentUser.CreateSubKey(Key)) k.SetValue(name, data); }
+    public static void Delete(string name) { using (var k = Registry.CurrentUser.CreateSubKey(Key)) k.DeleteValue(name, false); }
 }
 
 // ======================= Dispositivos Bluetooth =======================
@@ -255,6 +620,9 @@ class App : ApplicationContext
     // Bluetooth: um ícone por dispositivo escolhido.
     ContextMenuStrip menu = new ContextMenuStrip();
     ToolStripMenuItem btMenu = new ToolStripMenuItem("Dispositivos Bluetooth");
+    ToolStripMenuItem profilesMenu = new ToolStripMenuItem("Perfis do mouse");
+    ToolStripMenuItem keyboardMenu = new ToolStripMenuItem("Cor do teclado (Anne Pro 2)");
+    SettingsForm settingsForm;
     Dictionary<string, NotifyIcon> btTrays = new Dictionary<string, NotifyIcon>();
     List<BtDevice> bt = new List<BtDevice>();
     HashSet<string> btWarned = new HashSet<string>();
@@ -270,6 +638,15 @@ class App : ApplicationContext
         btMenu.DropDownItems.Add("(nenhum)");
         btMenu.DropDownOpening += delegate { BuildBtMenu(); };
         menu.Items.Add(btMenu);
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("Configurar mouse…", null, delegate { OpenSettings(); });
+        profilesMenu.DropDownItems.Add("(nenhum)");
+        profilesMenu.DropDownOpening += delegate { BuildProfilesMenu(); };
+        menu.Items.Add(profilesMenu);
+        keyboardMenu.DropDownItems.Add("(nenhum)");
+        keyboardMenu.DropDownOpening += delegate { BuildKeyboardMenu(); };
+        menu.Items.Add(keyboardMenu);
+        menu.Items.Add(new ToolStripSeparator());
         var freq = new ToolStripMenuItem("Atualizar a cada");
         foreach (int s in Intervals)
         {
@@ -306,6 +683,103 @@ class App : ApplicationContext
     {
         t.ContextMenuStrip = menu;
         t.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowDetails(); };
+    }
+
+    // ---------- edição do mouse ----------
+
+    // Lê o estado atual do mouse e grava só as diferenças. null = mouse não respondeu.
+    public static string ApplySettings(MouseSettings ignored, MouseSettings wanted)
+    {
+        return Mouse.With(m =>
+        {
+            var now = MouseSettings.Read(m);
+            return now == null ? null : wanted.Apply(m, now);
+        });
+    }
+
+    void OpenSettings()
+    {
+        if (settingsForm != null && !settingsForm.IsDisposed) { settingsForm.Activate(); return; }
+        var s = Mouse.With(m => MouseSettings.Read(m));
+        if (s == null)
+        {
+            MessageBox.Show("O mouse não respondeu. Ele está ligado e conectado (dongle ou cabo)?", "Configurar mouse",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        settingsForm = new SettingsForm(s);
+        settingsForm.FormClosed += delegate { RefreshMouse(); };
+        settingsForm.Show();
+    }
+
+    void BuildProfilesMenu()
+    {
+        profilesMenu.DropDownItems.Clear();
+        string[] names = Profiles.Names();
+        if (names.Length == 0)
+            profilesMenu.DropDownItems.Add("(crie perfis em \"Configurar mouse\")").Enabled = false;
+        foreach (string n in names)
+        {
+            string name = n;
+            profilesMenu.DropDownItems.Add(name, null, delegate { ApplyProfile(name); });
+        }
+    }
+
+    void ApplyProfile(string name)
+    {
+        string err = Mouse.With(m =>
+        {
+            var now = MouseSettings.Read(m);
+            if (now == null) return null;
+            var wanted = now.WithProfile(Profiles.Get(name));
+            return wanted == null ? "perfil inválido" : wanted.Apply(m, now);
+        });
+        if (err == null) mouseTray.ShowBalloonTip(5000, "Perfil não aplicado", "O mouse não respondeu.", ToolTipIcon.Warning);
+        else if (err.Length > 0) mouseTray.ShowBalloonTip(5000, "Perfil aplicado em parte", "Falhou: " + err, ToolTipIcon.Warning);
+        else mouseTray.ShowBalloonTip(3000, "Perfil \"" + name + "\" aplicado", "Configurações gravadas no mouse.", ToolTipIcon.Info);
+        RefreshMouse();
+    }
+
+    // ---------- cor do teclado ----------
+
+    static readonly string[] ColorNames = { "Branco", "Vermelho", "Verde", "Azul", "Roxo", "Ciano", "Amarelo", "Laranja", "Desligado" };
+    static readonly Color[] ColorValues = { Color.White, Color.Red, Color.Lime, Color.Blue, Color.FromArgb(160, 0, 255),
+        Color.Cyan, Color.Yellow, Color.FromArgb(255, 100, 0), Color.Black };
+
+    void BuildKeyboardMenu()
+    {
+        keyboardMenu.DropDownItems.Clear();
+        if (!Keyboard.Connected)
+        {
+            keyboardMenu.DropDownItems.Add("(ligue o teclado no cabo USB)").Enabled = false;
+            return;
+        }
+        for (int i = 0; i < ColorNames.Length; i++)
+        {
+            Color c = ColorValues[i];
+            var it = new ToolStripMenuItem(ColorNames[i], Swatch(c), delegate { SetKeyboardColor(c); });
+            keyboardMenu.DropDownItems.Add(it);
+        }
+        keyboardMenu.DropDownItems.Add(new ToolStripSeparator());
+        keyboardMenu.DropDownItems.Add("Outra cor…", null, delegate
+        {
+            using (var dlg = new ColorDialog { FullOpen = true })
+                if (dlg.ShowDialog() == DialogResult.OK) SetKeyboardColor(dlg.Color);
+        });
+    }
+
+    static Bitmap Swatch(Color c)
+    {
+        var b = new Bitmap(16, 16);
+        using (var g = Graphics.FromImage(b)) { g.Clear(c); g.DrawRectangle(Pens.Gray, 0, 0, 15, 15); }
+        return b;
+    }
+
+    void SetKeyboardColor(Color c)
+    {
+        bool ok = false;
+        try { ok = Keyboard.SetColor(c); } catch { }
+        if (!ok) mouseTray.ShowBalloonTip(4000, "Teclado", "Não consegui falar com o teclado. Ele está no cabo USB?", ToolTipIcon.Warning);
     }
 
     // ---------- Bluetooth ----------
@@ -550,6 +1024,13 @@ class App : ApplicationContext
             return;
         }
         if (args.Length > 1 && args[0] == "--icons") { Icons.Preview(args[1]); return; }
+        if (args.Length > 0 && args[0] == "--settings")
+        {
+            var s = Mouse.With(m => MouseSettings.Read(m));
+            File.WriteAllText(Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "teste.txt"),
+                s == null ? "sem leitura" : s.Serialize() + " | todos: " + string.Join(",", Array.ConvertAll(s.Dpi, x => x.ToString())));
+            return;
+        }
         bool isNew;
         using (new Mutex(true, AppName, out isNew))
         {
