@@ -14,11 +14,14 @@ Testado no **Redragon M916 PRO 1K** (dongle 2.4G e cabo).
 - Carregando: mostra um raio com o último nível real de antes do cabo. Enquanto carrega, a voltagem sobe e a porcentagem que o mouse informa fica inflada, então o app não usa esse número. Quando termina de carregar, aparece "F"
 - Avisa com notificação em 20% e em 10%
 - **Dispositivos Bluetooth** (teclados, controles, fones…): mostra a bateria que o próprio Windows já guarda, cada um com seu ícone, que tem a barra em cima. Você escolhe quais aparecem em botão direito → "Dispositivos Bluetooth". Testado com o teclado Anne Pro 2. Com o cabo ligado, o teclado sai do Bluetooth e o Windows para de atualizar a bateria dele, então o ícone mostra o último valor, que fica cinza depois de 1 dia sem atualizar
+- **Configurar o mouse** sem o driver da Redragon (botão direito → "Configurar mouse…"): valores de DPI de cada nível (50 a 26000), quantidade de níveis, nível ativo, polling (125 a 1000 Hz), LOD e tempo do Peak Performance. O app grava só o que mudou e lê de volta para conferir
+- **Perfis do mouse:** salve combinações (ex.: "Jogo", "Trabalho") e troque com um clique pelo menu
+- **Cor do teclado Anne Pro 2** (pelo cabo USB): cores prontas ou qualquer cor, usando o comando descoberto pelo [Annemone](https://github.com/illixion/Annemone). Isso substitui a iluminação configurada no ObinsKit
 - Clique no ícone para ver os detalhes: bateria, voltagem, tempo restante estimado, conexão (cabo/dongle), polling rate e nível de DPI ativo
 - Intervalo de atualização configurável: 5 s, 10 s, 30 s, 1 min ou 5 min
 - Opção "Iniciar com o Windows"
 - Funciona junto com o driver oficial da Redragon
-- **Só lê informações.** Nunca envia comandos de escrita, então não muda nenhuma configuração do mouse.
+- O monitor de bateria **só lê**. O app grava no mouse ou no teclado apenas quando você clica em "Aplicar", escolhe um perfil ou escolhe uma cor.
 
 ## Como usar
 
@@ -53,7 +56,18 @@ Comandos de 17 bytes no report ID `0x08`, na interface HID 1, coleção 5 (usage
 | Pedido | Resposta |
 |---|---|
 | `08 04 00…00 49` (bateria) | byte 6 = %, byte 7 = carregando, bytes 8-9 = mV (big-endian) |
-| `08 08 00 00 00 06 …` (lê memória 0x0000) | byte 6 = polling (`01`=1000 Hz…), byte 8 = nº de níveis de DPI, byte 10 = nível ativo (0..) |
+| `08 08 00 AA AA LL …` (lê `LL` bytes da memória em `AAAA`) | os dados vêm a partir do byte 6 |
+| `08 07 00 AA AA LL dados…` (grava na memória) | o mouse devolve o mesmo pacote quando aceita |
+
+Mapa da memória (confirmado no M916 PRO 1K). Valores simples vão em par com `0x55 − valor`:
+
+| Endereço | Configuração |
+|---|---|
+| `0x0000` | polling: `08`=125, `04`=250, `02`=500, `01`=1000 Hz |
+| `0x0002` / `0x0004` | quantidade de níveis de DPI / nível ativo (0..) |
+| `0x000A` | LOD (1 ou 2 mm) |
+| `0x000C + 4·n` | DPI do nível n: `[lo, lo, hi, chk]`, DPI = (código + 1) × 50, os 2 bits altos ficam nos bits 2-3 de cada metade do byte `hi` |
+| `0x00B7` | tempo do Peak Performance, em unidades de 10 s |
 
 Baseado no trabalho de [MouseBatteryIndicator](https://github.com/xIIyassineIIx/MouseBatteryIndicator), [ClickSync](https://github.com/Nuitfanee/ClickSync) e [ZaopinBatteryTray](https://github.com/frudrel/ZaopinBatteryTray).
 
