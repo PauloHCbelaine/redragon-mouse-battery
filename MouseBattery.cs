@@ -1,7 +1,5 @@
-// Monitor de bateria na bandeja do Windows para:
-//  - mouses Redragon com chip Compx (VID 0x3554), testado no M916 PRO 1K
-//  - headset Sony PULSE 3D pelo dongle USB (VID 0x054C, PID 0x0D5E)
-// Só LÊ informações; nunca altera nenhuma configuração dos dispositivos.
+// Monitor de bateria na bandeja do Windows para mouses Redragon com chip Compx (VID 0x3554),
+// testado no M916 PRO 1K. Só LÊ informações; nunca altera nenhuma configuração do mouse.
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -164,63 +162,6 @@ class MouseReading
     public DateTime Time = DateTime.Now;
 }
 
-// ======================= Headset Sony PULSE 3D =======================
-
-// O dongle não responde a pedidos: ele só envia um relatório 0xB0 quando algo muda (liga/desliga,
-// botão, cabo de carga, ou a cada degrau de 10% de bateria). Por isso ficamos escutando sempre.
-//   byte 3 = bateria 0..100 (passos de 10) ou 0x80 carregando; byte 4 bit 0x08 = headset ligado.
-class HeadsetListener
-{
-    public event Action<HeadsetReading> Report;
-    public volatile bool DonglePresent;
-
-    public void Start()
-    {
-        var t = new Thread(Loop); t.IsBackground = true; t.Start();
-    }
-
-    void Loop()
-    {
-        while (true)
-        {
-            var paths = Hid.FindPaths("vid_054c", "pid_0d5e", "mi_03", "col04");
-            DonglePresent = paths.Count > 0;
-            if (paths.Count == 0) { Thread.Sleep(5000); continue; }
-            try
-            {
-                using (var h = Hid.Open(paths[0]))
-                {
-                    if (h.IsInvalid) { Thread.Sleep(5000); continue; }
-                    using (var fs = new FileStream(h, FileAccess.Read, 64, true))
-                    {
-                        var buf = new byte[64];
-                        while (true)
-                        {
-                            int n = fs.Read(buf, 0, buf.Length); // bloqueia até chegar um relatório
-                            if (n <= 0) break;
-                            if (n >= 5 && buf[0] == 0xB0)
-                            {
-                                var r = new HeadsetReading();
-                                r.Connected = (buf[4] & 0x08) != 0;
-                                r.Charging = buf[3] == 0x80;
-                                r.Percent = (!r.Charging && buf[3] <= 100) ? buf[3] : -1;
-                                if (Report != null) Report(r);
-                            }
-                        }
-                    }
-                }
-            }
-            catch { }
-            Thread.Sleep(2000); // dongle removido ou erro: tenta de novo
-        }
-    }
-}
-
-class HeadsetReading
-{
-    public bool Connected, Charging; public int Percent = -1; public DateTime Time = DateTime.Now;
-}
-
 // ======================= App da bandeja =======================
 
 class App : ApplicationContext
@@ -230,7 +171,7 @@ class App : ApplicationContext
     const string AppName = "MouseBatteryRedragon";
     static readonly int[] Intervals = { 5, 10, 30, 60, 300 };
 
-    NotifyIcon mouseTray = new NotifyIcon(), headsetTray = new NotifyIcon();
+    NotifyIcon mouseTray = new NotifyIcon();
     System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
     ToolStripMenuItem startupItem;
     List<ToolStripMenuItem> intervalItems = new List<ToolStripMenuItem>();
@@ -242,11 +183,6 @@ class App : ApplicationContext
     bool warned20, warned10;
     DateTime dischargeStart; int dischargeStartPct = -1;
 
-    HeadsetListener headset = new HeadsetListener();
-    HeadsetReading hs;
-    int headsetLastPct = -1; DateTime headsetLastTime;
-    bool hsWarned;
-
     App()
     {
         ui.CreateControl();
@@ -255,7 +191,7 @@ class App : ApplicationContext
         var menu = new ContextMenuStrip();
         menu.Items.Add("Detalhes…", null, delegate { ShowDetails(); });
         menu.Items.Add("Atualizar agora", null, delegate { RefreshMouse(); });
-        var freq = new ToolStripMenuItem("Atualizar o mouse a cada");
+        var freq = new ToolStripMenuItem("Atualizar a cada");
         foreach (int s in Intervals)
         {
             int sec = s;
@@ -270,21 +206,14 @@ class App : ApplicationContext
         startupItem.Checked = IsStartupEnabled();
         menu.Items.Add(startupItem);
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Sair", null, delegate { mouseTray.Visible = headsetTray.Visible = false; Application.Exit(); });
+        menu.Items.Add("Sair", null, delegate { mouseTray.Visible = false; Application.Exit(); });
 
-        foreach (var t in new[] { mouseTray, headsetTray })
-        {
-            t.ContextMenuStrip = menu;
-            t.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowDetails(); };
-        }
+        mouseTray.ContextMenuStrip = menu;
+        mouseTray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowDetails(); };
         SetIcon(mouseTray, Icons.Mouse("…", Color.Gray, false), "Mouse: lendo…");
         mouseTray.Visible = true;
-        ShowHeadset();
 
-        headset.Report += r => ui.BeginInvoke((Action)delegate { OnHeadset(r); });
-        headset.Start();
-
-        timer.Tick += delegate { RefreshMouse(); UpdateHeadsetVisibility(); };
+        timer.Tick += delegate { RefreshMouse(); };
         SetInterval(LoadInterval());
         RefreshMouse();
     }
@@ -361,60 +290,11 @@ class App : ApplicationContext
         return h >= 24 ? "~" + (h / 24).ToString("0.0") + " dias" : "~" + h.ToString("0") + " horas";
     }
 
-    // ---------- headset ----------
-
-    void OnHeadset(HeadsetReading r)
-    {
-        hs = r;
-        if (r.Connected && r.Percent >= 0)
-        {
-            headsetLastPct = r.Percent; headsetLastTime = r.Time;
-            Save("HeadsetLastPct", r.Percent);
-            Save("HeadsetLastTime", r.Time.ToString("o"));
-        }
-        if (!r.Connected || r.Charging || r.Percent > 20) hsWarned = false;
-        else if (!hsWarned)
-        {
-            hsWarned = true;
-            headsetTray.ShowBalloonTip(8000, "Bateria do headset baixa", "Restam " + r.Percent + "%.", ToolTipIcon.Info);
-        }
-        ShowHeadset();
-    }
-
-    void ShowHeadset()
-    {
-        UpdateHeadsetVisibility();
-        string last = headsetLastPct >= 0 ? headsetLastPct + "% às " + headsetLastTime.ToString("HH:mm") : null;
-        if (hs == null)
-            // Ainda não chegou nenhum aviso do headset desde que o app abriu.
-            SetIcon(headsetTray, Icons.Headset(headsetLastPct >= 0 ? headsetLastPct.ToString() : "?", Color.Gray, false),
-                "Headset: aguardando aviso" + (last != null ? "\nÚltimo: " + last : "\nAperte um botão dele"));
-        else if (!hs.Connected)
-            SetIcon(headsetTray, Icons.Headset("", Color.Gray, false), "Headset desligado" + (last != null ? "\nÚltimo: " + last : ""));
-        else if (hs.Charging)
-            SetIcon(headsetTray, Icons.Headset(headsetLastPct >= 0 ? headsetLastPct.ToString() : "", Color.DeepSkyBlue, true), "Headset carregando");
-        else
-        {
-            Color c = hs.Percent <= 10 ? Color.Red : hs.Percent <= 30 ? Color.Orange : Color.LimeGreen;
-            SetIcon(headsetTray, Icons.Headset(hs.Percent >= 100 ? "F" : hs.Percent.ToString(), c, false),
-                "Headset: " + hs.Percent + "%\n" + hs.Time.ToString("HH:mm:ss"));
-        }
-    }
-
-    // O ícone do headset só aparece depois que o dongle mandou algum aviso (agora ou numa vez
-    // anterior). Alguns dongles nunca mandam nada, e aí o ícone ficaria parado em "?".
-    void UpdateHeadsetVisibility()
-    {
-        headsetTray.Visible = (hs != null || headsetLastPct >= 0) &&
-            (headset.DonglePresent || Hid.FindPaths("vid_054c", "pid_0d5e").Count > 0);
-    }
-
     // ---------- detalhes ----------
 
     void ShowDetails()
     {
         var sb = new StringBuilder();
-        sb.AppendLine("MOUSE");
         if (mouse == null) sb.AppendLine("Sem leitura. O mouse está ligado?");
         else
         {
@@ -430,17 +310,7 @@ class App : ApplicationContext
             if (mouse.DpiLevels > 0) sb.AppendLine("DPI:\tnível " + mouse.DpiLevel + " de " + mouse.DpiLevels);
             sb.AppendLine("Leitura:\t" + mouse.Time.ToString("HH:mm:ss") + " (a cada " + timer.Interval / 1000 + " s)");
         }
-        if (headsetTray.Visible)
-        {
-            sb.AppendLine();
-            sb.AppendLine("HEADSET PULSE 3D");
-            if (hs == null) sb.AppendLine("Aguardando o primeiro aviso.\nAperte um botão do headset (volume, mute).");
-            else if (!hs.Connected) sb.AppendLine("Desligado");
-            else if (hs.Charging) sb.AppendLine("Bateria:\tcarregando");
-            else sb.AppendLine("Bateria:\t" + hs.Percent + "% (passos de 10%)");
-            if (headsetLastPct >= 0) sb.AppendLine("Último:\t" + headsetLastPct + "% em " + headsetLastTime.ToString("dd/MM HH:mm"));
-        }
-        MessageBox.Show(sb.ToString(), "Bateria dos dispositivos", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        MessageBox.Show(sb.ToString(), "Mouse Redragon", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     static void SetIcon(NotifyIcon tray, Icon icon, string tip)
@@ -476,10 +346,6 @@ class App : ApplicationContext
     void LoadSaved()
     {
         object v = Load("MouseLastPct"); if (v is int) mouseRealPct = (int)v;
-        v = Load("HeadsetLastPct"); if (v is int) headsetLastPct = (int)v;
-        DateTime t;
-        if (DateTime.TryParse(Load("HeadsetLastTime") as string, null, System.Globalization.DateTimeStyles.RoundtripKind, out t)) headsetLastTime = t;
-        else headsetLastPct = -1;
     }
 
     static int LoadInterval()
@@ -513,8 +379,7 @@ class App : ApplicationContext
             MouseReading r = Mouse.Read();
             File.WriteAllText(Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "teste.txt"), r.Ok
                 ? r.Percent + "% carregando=" + r.Charging + " " + r.MilliVolts + "mV cabo=" + r.Wired +
-                  " polling=" + r.PollingHz + " dpi=" + r.DpiLevel + "/" + r.DpiLevels +
-                  " headset_dongle=" + (Hid.FindPaths("vid_054c", "pid_0d5e", "mi_03", "col04").Count > 0)
+                  " polling=" + r.PollingHz + " dpi=" + r.DpiLevel + "/" + r.DpiLevels
                 : "sem leitura");
             return;
         }
@@ -533,13 +398,13 @@ class App : ApplicationContext
 
 static class Icons
 {
-    // Mouse: número com uma barra embaixo. Headset: número com um arco (a "tiara") em cima.
-    public static Icon Mouse(string text, Color color, bool charging) { return Make(Draw(text, color, charging, false)); }
-    public static Icon Headset(string text, Color color, bool charging) { return Make(Draw(text, color, charging, true)); }
+    // Número da bateria com uma barra embaixo; carregando = raio.
+    public static Icon Mouse(string text, Color color, bool charging)
+    {
+        using (var bmp = Draw(text, color, charging)) return Icon.FromHandle(bmp.GetHicon());
+    }
 
-    static Icon Make(Bitmap bmp) { using (bmp) return Icon.FromHandle(bmp.GetHicon()); }
-
-    static Bitmap Draw(string text, Color color, bool charging, bool headset)
+    static Bitmap Draw(string text, Color color, bool charging)
     {
         var bmp = new Bitmap(32, 32);
         using (var g = Graphics.FromImage(bmp))
@@ -548,12 +413,8 @@ static class Icons
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             g.Clear(Color.Transparent);
-            float top = headset ? 6 : 0, bottom = headset ? 32 : 28;
-
-            if (headset)
-                using (var pen = new Pen(color, 3)) g.DrawArc(pen, 3, 1, 26, 16, 180, 180);
-            else
-                g.FillRectangle(brush, 2, 28, 28, 3);
+            const float top = 0, bottom = 28;
+            g.FillRectangle(brush, 2, 28, 28, 3);
 
             if (charging)
             {
@@ -570,7 +431,7 @@ static class Icons
             }
             else
             {
-                float size = text.Length >= 3 ? 13 : text.Length == 2 ? (headset ? 17 : 19) : (headset ? 20 : 22);
+                float size = text.Length >= 3 ? 13 : text.Length == 2 ? 19 : 22;
                 using (var f = new Font("Segoe UI", size, FontStyle.Bold, GraphicsUnit.Pixel))
                 using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
                     g.DrawString(text.Length > 0 ? text : "–", f, brush, new RectangleF(-2, top, 36, bottom - top), sf);
@@ -583,11 +444,9 @@ static class Icons
     public static void Preview(string file)
     {
         var states = new List<Bitmap> {
-            Draw("70", Color.LimeGreen, false, false), Draw("25", Color.Orange, false, false), Draw("8", Color.Red, false, false),
-            Draw("70", Color.DeepSkyBlue, true, false), Draw("", Color.DeepSkyBlue, true, false), Draw("F", Color.DeepSkyBlue, false, false),
-            Draw("?", Color.Gray, false, false),
-            Draw("60", Color.LimeGreen, false, true), Draw("10", Color.Red, false, true), Draw("60", Color.DeepSkyBlue, true, true),
-            Draw("", Color.Gray, false, true), Draw("?", Color.Gray, false, true) };
+            Draw("70", Color.LimeGreen, false), Draw("25", Color.Orange, false), Draw("8", Color.Red, false),
+            Draw("70", Color.DeepSkyBlue, true), Draw("", Color.DeepSkyBlue, true), Draw("F", Color.DeepSkyBlue, false),
+            Draw("?", Color.Gray, false) };
         using (var sheet = new Bitmap(states.Count * 40 + 8, 48))
         using (var g = Graphics.FromImage(sheet))
         {
