@@ -17,7 +17,8 @@ Testado no **Redragon M916 PRO 1K** (dongle 2.4G e cabo).
 - **Configurar o mouse** sem o driver da Redragon (botão direito → "Configurar mouse…"): valores de DPI de cada nível (50 a 26000), quantidade de níveis, nível ativo, polling (125 a 1000 Hz), LOD e tempo do Peak Performance. O app grava só o que mudou e lê de volta para conferir
 - **Perfis do mouse:** salve combinações (ex.: "Jogo", "Trabalho") e troque com um clique pelo menu
 - **Cor do teclado Anne Pro 2** (pelo cabo USB): cores prontas ou qualquer cor, usando o comando descoberto pelo [Annemone](https://github.com/illixion/Annemone). Isso substitui a iluminação configurada no ObinsKit
-- Clique no ícone para ver os detalhes: bateria, voltagem, tempo restante estimado, conexão (cabo/dongle), polling rate e nível de DPI ativo
+- Clique no ícone para abrir o **painel**: um cartão por dispositivo, com porcentagem, barra de bateria, voltagem, tempo restante estimado, conexão (cabo/dongle), polling rate e nível de DPI ativo
+- Visual no estilo do Windows 11, que segue o tema claro/escuro e a cor de destaque do sistema
 - Intervalo de atualização configurável: 5 s, 10 s, 30 s, 1 min ou 5 min
 - Opção "Iniciar com o Windows"
 - Funciona junto com o driver oficial da Redragon
