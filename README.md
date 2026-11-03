@@ -11,6 +11,7 @@ Testado no **Redragon M916 PRO 1K** (dongle 2.4G e cabo).
 
 - Mostra a porcentagem da bateria no próprio ícone da bandeja, com cor:
   verde (normal), laranja (≤ 30%), vermelho (≤ 15%), azul (carregando)
+- Carregando: mostra um raio com o último nível real de antes do cabo. Enquanto carrega, a voltagem sobe e a porcentagem que o mouse informa fica inflada, então o app não usa esse número. Quando termina de carregar, aparece "F"
 - Avisa com notificação em 20% e em 10%
 - Clique no ícone para ver os detalhes: bateria, voltagem, tempo restante estimado, conexão (cabo/dongle), polling rate e nível de DPI ativo
 - Intervalo de atualização configurável: 5 s, 10 s, 30 s, 1 min ou 5 min
