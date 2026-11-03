@@ -162,6 +162,75 @@ class MouseReading
     public DateTime Time = DateTime.Now;
 }
 
+// ======================= Dispositivos Bluetooth =======================
+
+// O Windows guarda a bateria dos dispositivos Bluetooth LE (teclados, controles, fones…) como
+// propriedades do próprio dispositivo. Basta ler, sem falar com o aparelho.
+class BtDevice
+{
+    public string Id, Name, Category; public int Percent; public bool Charging; public DateTime Updated;
+}
+
+static class Bluetooth
+{
+    [StructLayout(LayoutKind.Sequential)]
+    struct DEVPROPKEY { public Guid fmtid; public uint pid; public DEVPROPKEY(string g, uint p) { fmtid = new Guid(g); pid = p; } }
+    [StructLayout(LayoutKind.Sequential)]
+    struct SP_DEVINFO_DATA { public int cbSize; public Guid ClassGuid; public uint DevInst; public IntPtr Reserved; }
+
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr SetupDiGetClassDevs(IntPtr classGuid, string enumerator, IntPtr hwnd, int flags);
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern bool SetupDiEnumDeviceInfo(IntPtr set, int idx, ref SP_DEVINFO_DATA d);
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool SetupDiGetDevicePropertyW(IntPtr set, ref SP_DEVINFO_DATA d, ref DEVPROPKEY key, out uint type, byte[] buf, int size, out int req, int flags);
+    [DllImport("setupapi.dll")] static extern bool SetupDiDestroyDeviceInfoList(IntPtr set);
+
+    static DEVPROPKEY KBattery = new DEVPROPKEY("104EA319-6EE2-4701-BD47-8DDBF425BBE5", 2);
+    static DEVPROPKEY KCharging = new DEVPROPKEY("104EA319-6EE2-4701-BD47-8DDBF425BBE5", 3);
+    static DEVPROPKEY KUpdated = new DEVPROPKEY("104EA319-6EE2-4701-BD47-8DDBF425BBE5", 7);
+    static DEVPROPKEY KName = new DEVPROPKEY("A45C254E-DF1C-4EFD-8020-67D146A850E0", 14);     // FriendlyName
+    static DEVPROPKEY KInstance = new DEVPROPKEY("78C34FC8-104A-4ACA-9EA4-524D52996E57", 256); // InstanceId
+    static DEVPROPKEY KCategory = new DEVPROPKEY("78C34FC8-104A-4ACA-9EA4-524D52996E57", 90);  // DeviceContainer_Category
+
+    static byte[] Get(IntPtr set, ref SP_DEVINFO_DATA d, DEVPROPKEY k)
+    {
+        uint type; int req;
+        var buf = new byte[1024];
+        return SetupDiGetDevicePropertyW(set, ref d, ref k, out type, buf, buf.Length, out req, 0) ? Trim(buf, req) : null;
+    }
+    static byte[] Trim(byte[] b, int n) { var r = new byte[n]; Array.Copy(b, r, n); return r; }
+    static string Str(byte[] b) { return b == null ? null : Encoding.Unicode.GetString(b).Split('\0')[0]; }
+
+    public static List<BtDevice> List()
+    {
+        var list = new List<BtDevice>();
+        IntPtr set = SetupDiGetClassDevs(IntPtr.Zero, "BTHLE", IntPtr.Zero, 0x6); // ALLCLASSES | PRESENT
+        try
+        {
+            for (int i = 0; ; i++)
+            {
+                var d = new SP_DEVINFO_DATA(); d.cbSize = Marshal.SizeOf(d);
+                if (!SetupDiEnumDeviceInfo(set, i, ref d)) break;
+                byte[] bat = Get(set, ref d, KBattery);
+                if (bat == null || bat.Length < 1 || bat[0] > 100) continue;
+                var dev = new BtDevice();
+                dev.Percent = bat[0];
+                byte[] ch = Get(set, ref d, KCharging);
+                dev.Charging = ch != null && ch.Length > 0 && ch[0] != 0;
+                byte[] up = Get(set, ref d, KUpdated);
+                if (up != null && up.Length >= 8) dev.Updated = DateTime.FromFileTime(BitConverter.ToInt64(up, 0));
+                dev.Name = Str(Get(set, ref d, KName)) ?? "Bluetooth";
+                dev.Id = Str(Get(set, ref d, KInstance)) ?? dev.Name;
+                dev.Category = Str(Get(set, ref d, KCategory)) ?? "";
+                list.Add(dev);
+            }
+        }
+        finally { SetupDiDestroyDeviceInfoList(set); }
+        return list;
+    }
+}
+
 // ======================= App da bandeja =======================
 
 class App : ApplicationContext
@@ -183,14 +252,24 @@ class App : ApplicationContext
     bool warned20, warned10;
     DateTime dischargeStart; int dischargeStartPct = -1;
 
+    // Bluetooth: um ícone por dispositivo escolhido.
+    ContextMenuStrip menu = new ContextMenuStrip();
+    ToolStripMenuItem btMenu = new ToolStripMenuItem("Dispositivos Bluetooth");
+    Dictionary<string, NotifyIcon> btTrays = new Dictionary<string, NotifyIcon>();
+    List<BtDevice> bt = new List<BtDevice>();
+    HashSet<string> btWarned = new HashSet<string>();
+    HashSet<string> btShown, btHidden; // escolhas do usuário; sem escolha = mostra se atualizou nos últimos 3 dias
+
     App()
     {
         ui.CreateControl();
         LoadSaved();
 
-        var menu = new ContextMenuStrip();
         menu.Items.Add("Detalhes…", null, delegate { ShowDetails(); });
-        menu.Items.Add("Atualizar agora", null, delegate { RefreshMouse(); });
+        menu.Items.Add("Atualizar agora", null, delegate { RefreshMouse(); RefreshBt(); });
+        btMenu.DropDownItems.Add("(nenhum)");
+        btMenu.DropDownOpening += delegate { BuildBtMenu(); };
+        menu.Items.Add(btMenu);
         var freq = new ToolStripMenuItem("Atualizar a cada");
         foreach (int s in Intervals)
         {
@@ -206,16 +285,89 @@ class App : ApplicationContext
         startupItem.Checked = IsStartupEnabled();
         menu.Items.Add(startupItem);
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Sair", null, delegate { mouseTray.Visible = false; Application.Exit(); });
+        menu.Items.Add("Sair", null, delegate
+        {
+            mouseTray.Visible = false;
+            foreach (var t in btTrays.Values) t.Visible = false;
+            Application.Exit();
+        });
 
-        mouseTray.ContextMenuStrip = menu;
-        mouseTray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowDetails(); };
+        Attach(mouseTray);
         SetIcon(mouseTray, Icons.Mouse("…", Color.Gray, false), "Mouse: lendo…");
         mouseTray.Visible = true;
 
-        timer.Tick += delegate { RefreshMouse(); };
+        timer.Tick += delegate { RefreshMouse(); RefreshBt(); };
         SetInterval(LoadInterval());
         RefreshMouse();
+        RefreshBt();
+    }
+
+    void Attach(NotifyIcon t)
+    {
+        t.ContextMenuStrip = menu;
+        t.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowDetails(); };
+    }
+
+    // ---------- Bluetooth ----------
+
+    void RefreshBt()
+    {
+        try { bt = Bluetooth.List(); } catch { return; }
+        var seen = new HashSet<string>();
+        foreach (var d in bt)
+        {
+            seen.Add(d.Id);
+            NotifyIcon t;
+            if (!btTrays.TryGetValue(d.Id, out t)) { t = new NotifyIcon(); Attach(t); btTrays[d.Id] = t; }
+            bool stale = (DateTime.Now - d.Updated).TotalHours > 24;
+            Color c = stale ? Color.Gray : d.Charging ? Color.DeepSkyBlue : d.Percent <= 15 ? Color.Red : d.Percent <= 30 ? Color.Orange : Color.LimeGreen;
+            SetIcon(t, Icons.Bluetooth(d.Charging ? "" : d.Percent >= 100 ? "F" : d.Percent.ToString(), c, d.Charging),
+                d.Name + ": " + (d.Charging ? "carregando" : d.Percent + "%") + "\nAtualizado " + When(d.Updated));
+            t.Visible = IsShown(d);
+
+            if (d.Charging || d.Percent > 25 || stale) btWarned.Remove(d.Id);
+            else if (d.Percent <= 20 && t.Visible && btWarned.Add(d.Id))
+                t.ShowBalloonTip(8000, "Bateria baixa: " + d.Name, "Restam " + d.Percent + "%.", ToolTipIcon.Info);
+        }
+        foreach (var id in new List<string>(btTrays.Keys))
+            if (!seen.Contains(id)) { btTrays[id].Visible = false; btTrays[id].Dispose(); btTrays.Remove(id); }
+    }
+
+    bool IsShown(BtDevice d)
+    {
+        if (btShown.Contains(d.Id)) return true;
+        if (btHidden.Contains(d.Id)) return false;
+        return d.Updated != DateTime.MinValue && (DateTime.Now - d.Updated).TotalDays <= 3;
+    }
+
+    void BuildBtMenu()
+    {
+        btMenu.DropDownItems.Clear();
+        if (bt.Count == 0) { btMenu.DropDownItems.Add("(nenhum com bateria)").Enabled = false; return; }
+        foreach (var d in bt)
+        {
+            var dev = d;
+            var it = new ToolStripMenuItem(d.Name + " — " + (d.Charging ? "carregando" : d.Percent + "%") + " (" + When(d.Updated) + ")");
+            it.Checked = IsShown(d);
+            it.Click += delegate
+            {
+                bool show = !IsShown(dev);
+                btShown.Remove(dev.Id); btHidden.Remove(dev.Id);
+                (show ? btShown : btHidden).Add(dev.Id);
+                Save("BtShown", new List<string>(btShown).ToArray());
+                Save("BtHidden", new List<string>(btHidden).ToArray());
+                RefreshBt();
+            };
+            btMenu.DropDownItems.Add(it);
+        }
+    }
+
+    static string When(DateTime t)
+    {
+        if (t == DateTime.MinValue) return "nunca";
+        if (t.Date == DateTime.Today) return "hoje " + t.ToString("HH:mm");
+        if (t.Date == DateTime.Today.AddDays(-1)) return "ontem " + t.ToString("HH:mm");
+        return t.ToString("dd/MM HH:mm");
     }
 
     // ---------- mouse ----------
@@ -295,6 +447,7 @@ class App : ApplicationContext
     void ShowDetails()
     {
         var sb = new StringBuilder();
+        sb.AppendLine("MOUSE");
         if (mouse == null) sb.AppendLine("Sem leitura. O mouse está ligado?");
         else
         {
@@ -310,7 +463,15 @@ class App : ApplicationContext
             if (mouse.DpiLevels > 0) sb.AppendLine("DPI:\tnível " + mouse.DpiLevel + " de " + mouse.DpiLevels);
             sb.AppendLine("Leitura:\t" + mouse.Time.ToString("HH:mm:ss") + " (a cada " + timer.Interval / 1000 + " s)");
         }
-        MessageBox.Show(sb.ToString(), "Mouse Redragon", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        foreach (var d in bt)
+        {
+            if (!IsShown(d)) continue;
+            sb.AppendLine();
+            sb.AppendLine(d.Name.ToUpperInvariant() + " (Bluetooth)");
+            sb.AppendLine("Bateria:\t" + (d.Charging ? "carregando" : d.Percent + "%"));
+            sb.AppendLine("Atualizado:\t" + When(d.Updated));
+        }
+        MessageBox.Show(sb.ToString(), "Bateria dos dispositivos", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     static void SetIcon(NotifyIcon tray, Icon icon, string tip)
@@ -346,6 +507,8 @@ class App : ApplicationContext
     void LoadSaved()
     {
         object v = Load("MouseLastPct"); if (v is int) mouseRealPct = (int)v;
+        btShown = new HashSet<string>(Load("BtShown") as string[] ?? new string[0]);
+        btHidden = new HashSet<string>(Load("BtHidden") as string[] ?? new string[0]);
     }
 
     static int LoadInterval()
@@ -381,6 +544,9 @@ class App : ApplicationContext
                 ? r.Percent + "% carregando=" + r.Charging + " " + r.MilliVolts + "mV cabo=" + r.Wired +
                   " polling=" + r.PollingHz + " dpi=" + r.DpiLevel + "/" + r.DpiLevels
                 : "sem leitura");
+            foreach (var d in Bluetooth.List())
+                File.AppendAllText(Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "teste.txt"),
+                    "\r\nBT " + d.Name + " " + d.Percent + "% carregando=" + d.Charging + " atualizado=" + d.Updated.ToString("dd/MM HH:mm") + " cat=" + d.Category);
             return;
         }
         if (args.Length > 1 && args[0] == "--icons") { Icons.Preview(args[1]); return; }
@@ -398,13 +564,13 @@ class App : ApplicationContext
 
 static class Icons
 {
-    // Número da bateria com uma barra embaixo; carregando = raio.
-    public static Icon Mouse(string text, Color color, bool charging)
-    {
-        using (var bmp = Draw(text, color, charging)) return Icon.FromHandle(bmp.GetHicon());
-    }
+    // Número da bateria; carregando = raio. Mouse: barra embaixo. Bluetooth: barra em cima.
+    public static Icon Mouse(string text, Color color, bool charging) { return Make(Draw(text, color, charging, false)); }
+    public static Icon Bluetooth(string text, Color color, bool charging) { return Make(Draw(text, color, charging, true)); }
 
-    static Bitmap Draw(string text, Color color, bool charging)
+    static Icon Make(Bitmap bmp) { using (bmp) return Icon.FromHandle(bmp.GetHicon()); }
+
+    static Bitmap Draw(string text, Color color, bool charging, bool barTop)
     {
         var bmp = new Bitmap(32, 32);
         using (var g = Graphics.FromImage(bmp))
@@ -413,8 +579,8 @@ static class Icons
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             g.Clear(Color.Transparent);
-            const float top = 0, bottom = 28;
-            g.FillRectangle(brush, 2, 28, 28, 3);
+            float top = barTop ? 4 : 0, bottom = barTop ? 32 : 28;
+            g.FillRectangle(brush, 2, barTop ? 1 : 28, 28, 3);
 
             if (charging)
             {
@@ -444,9 +610,11 @@ static class Icons
     public static void Preview(string file)
     {
         var states = new List<Bitmap> {
-            Draw("70", Color.LimeGreen, false), Draw("25", Color.Orange, false), Draw("8", Color.Red, false),
-            Draw("70", Color.DeepSkyBlue, true), Draw("", Color.DeepSkyBlue, true), Draw("F", Color.DeepSkyBlue, false),
-            Draw("?", Color.Gray, false) };
+            Draw("70", Color.LimeGreen, false, false), Draw("25", Color.Orange, false, false), Draw("8", Color.Red, false, false),
+            Draw("70", Color.DeepSkyBlue, true, false), Draw("", Color.DeepSkyBlue, true, false), Draw("F", Color.DeepSkyBlue, false, false),
+            Draw("?", Color.Gray, false, false),
+            Draw("F", Color.LimeGreen, false, true), Draw("18", Color.Orange, false, true), Draw("", Color.DeepSkyBlue, true, true),
+            Draw("6", Color.Gray, false, true) };
         using (var sheet = new Bitmap(states.Count * 40 + 8, 48))
         using (var g = Graphics.FromImage(sheet))
         {
