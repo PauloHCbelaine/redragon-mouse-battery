@@ -21,8 +21,8 @@ using Microsoft.Win32.SafeHandles;
 [assembly: AssemblyDescription("Bateria e configuração de mouses Redragon, teclado Anne Pro 2 e dispositivos Bluetooth")]
 [assembly: AssemblyProduct("Mouse Battery Redragon")]
 [assembly: AssemblyCopyright("MIT · github.com/PauloHCbelaine/redragon-mouse-battery")]
-[assembly: AssemblyVersion("1.6.1.0")]
-[assembly: AssemblyFileVersion("1.6.1.0")]
+[assembly: AssemblyVersion("1.7.0.0")]
+[assembly: AssemblyFileVersion("1.7.0.0")]
 
 static class Hid
 {
@@ -397,6 +397,109 @@ static class Keyboard
     }
 }
 
+// Informações do Anne Pro 2 pelo Bluetooth, com o mesmo protocolo do ObinsKit (só leitura).
+// Pacote: 02 7B 12 [destino<<4 | 2] 00 LEN 00 00 7D GRUPO SUB. A resposta traz GRUPO e SUB nos bytes 9 e 10.
+// Dormindo, o teclado não responde: aí fica valendo a última leitura.
+class AnneInfo
+{
+    public string Mac, KeyFw, LedFw, BleFw; public long Hours = -1; public DateTime Time;
+    public int MilliVolts, Percent = -1; public DateTime BatteryTime;
+}
+
+static class AnnePro
+{
+    static string FindPath()
+    {
+        var paths = Hid.FindPaths("vid&01000d_pid&f0e0");
+        foreach (string p in paths)
+        {
+            Hid.Caps c = Hid.GetCaps(p);
+            if (c != null && c.UsagePage == 0xFF00 && c.OutLen == 19) return p;
+        }
+        return null;
+    }
+
+    public static bool Present { get { return FindPath() != null; } }
+
+    public static AnneInfo Read()
+    {
+        string path = FindPath();
+        if (path == null) return null;
+        pending = null;
+        var m = System.Text.RegularExpressions.Regex.Match(path, "_([0-9a-f]{12})&col");
+        using (var h = Hid.Open(path))
+        {
+            if (h.IsInvalid) return null;
+            using (var fs = new FileStream(h, FileAccess.ReadWrite, 19, true))
+            {
+                var info = new AnneInfo { Mac = m.Success ? m.Groups[1].Value : null, Time = DateTime.Now };
+                bool any = false;
+                byte[] bat = Ask(fs, 3, 0x01, 0x05);
+                if (bat != null && bat.Length >= 2)
+                {
+                    // Mesma conta do ObinsKit: valor do ADC × 2 × 3,1 / 4095 = volts.
+                    double v = BitConverter.ToUInt16(bat, 0) * 2 * 3.1 / 4095;
+                    if (v > 3.0 && v < 4.5) { info.MilliVolts = (int)Math.Round(v * 1000); info.Percent = Percent(v); info.BatteryTime = DateTime.Now; any = true; }
+                }
+                byte[] fw = Ask(fs, 3, 0x01, 0x03);
+                if (fw != null && fw.Length >= 6)
+                {
+                    info.KeyFw = Ver(fw[1], fw[0]); info.LedFw = Ver(fw[3], fw[2]); info.BleFw = Ver(fw[5], fw[4]); any = true;
+                }
+                byte[] up = Ask(fs, 3, 0x01, 0x02);
+                if (up != null && up.Length >= 4) { info.Hours = BitConverter.ToUInt32(up, 0); any = true; }
+                return any ? info : null; // nada respondeu: dormindo
+            }
+        }
+    }
+
+    static string Ver(byte major, byte minor) { return major + "." + minor.ToString("00"); }
+
+    // Tabela de voltagem para % do ObinsKit.
+    static int Percent(double v)
+    {
+        double p = v >= 4.1 ? 100 : v >= 4.0 ? 90 + (v - 4.0) / .15 * 10 : v >= 3.9 ? 80 + (v - 3.9) / .1 * 10 :
+                   v >= 3.8 ? 70 + (v - 3.8) / .1 * 10 : v >= 3.75 ? 60 + (v - 3.75) / .05 * 10 : v >= 3.7 ? 50 + (v - 3.7) / .05 * 10 :
+                   v >= 3.65 ? 40 + (v - 3.65) / .05 * 10 : v >= 3.6 ? 30 + (v - 3.6) / .05 * 10 : v >= 3.5 ? 20 + (v - 3.5) / .1 * 10 :
+                   v >= 3.4 ? 10 + (v - 3.4) / .1 * 10 : 0;
+        return (int)Math.Round(p);
+    }
+
+    // As respostas pelo Bluetooth às vezes se perdem: tenta duas vezes.
+    static byte[] Ask(FileStream fs, int dst, byte grp, byte sub)
+    {
+        return AskOnce(fs, dst, grp, sub) ?? AskOnce(fs, dst, grp, sub);
+    }
+
+    // Manda um pedido e devolve os dados da resposta (só respostas de um pacote).
+    static byte[] AskOnce(FileStream fs, int dst, byte grp, byte sub)
+    {
+        var req = new byte[19];
+        byte[] head = { 0x02, 0x7B, 0x12, (byte)((dst << 4) | 2), 0x00, 0x02, 0, 0, 0x7D, grp, sub };
+        Array.Copy(head, req, head.Length);
+        fs.Write(req, 0, req.Length);
+        DateTime end = DateTime.Now.AddMilliseconds(700);
+        while (true)
+        {
+            if (pending == null) { pendingBuf = new byte[19]; pending = fs.BeginRead(pendingBuf, 0, 19, null, null); }
+            TimeSpan left = end - DateTime.Now;
+            if (left <= TimeSpan.Zero || !pending.AsyncWaitHandle.WaitOne(left)) return null;
+            int n = fs.EndRead(pending);
+            byte[] b = pendingBuf;
+            pending = null;
+            if (n >= 11 && b[1] == 0x7B && b[8] == 0x7D && b[9] == grp && b[10] == sub && (b[4] & 0x80) == 0)
+            {
+                int len = Math.Max(0, Math.Min(b[5] - 2, n - 11));
+                var d = new byte[len]; Array.Copy(b, 11, d, 0, len); return d;
+            }
+        }
+    }
+
+    // A leitura pendente morre junto com o handle; não vale para o próximo Read.
+    [ThreadStatic] static IAsyncResult pending;
+    [ThreadStatic] static byte[] pendingBuf;
+}
+
 // Perfis guardados no registro do usuário.
 static class Profiles
 {
@@ -528,6 +631,7 @@ class App : ApplicationContext
     SettingsWindow settingsForm;
     Dictionary<string, NotifyIcon> btTrays = new Dictionary<string, NotifyIcon>();
     List<BtDevice> bt = new List<BtDevice>();
+    AnneInfo anne; bool anneBusy; DateTime anneNext;
     HashSet<string> btWarned = new HashSet<string>();
     HashSet<string> btShown, btHidden; // escolhas do usuário; sem escolha = mostra se atualizou nos últimos 3 dias
 
@@ -687,6 +791,7 @@ class App : ApplicationContext
         sb.AppendLine("== Bluetooth (bateria guardada pelo Windows) ==");
         try { foreach (var d in Bluetooth.List()) sb.AppendLine(d.Name + ": " + d.Percent + "% atualizado " + d.Updated.ToString("yyyy-MM-dd HH:mm") + " categoria=" + d.Category); }
         catch (Exception e) { sb.AppendLine("erro: " + e.Message); }
+        sb.AppendLine(DescribeAnne());
         sb.AppendLine();
 
         sb.AppendLine("== Todos os dispositivos HID (caminho · page:usage · tamanhos in/out/feature) ==");
@@ -888,6 +993,7 @@ class App : ApplicationContext
     void RefreshBt()
     {
         try { bt = Bluetooth.List(); } catch { return; }
+        ApplyAnne();
         var seen = new HashSet<string>();
         foreach (var d in bt)
         {
@@ -908,6 +1014,58 @@ class App : ApplicationContext
             if (!seen.Contains(id)) { btTrays[id].Visible = false; btTrays[id].Dispose(); btTrays.Remove(id); }
         UpdateTrayVisibility();
         UpdateFlyout();
+        RefreshAnne();
+    }
+
+    // Firmware e horas de uso do Anne Pro 2. Mudam pouco, então lê a cada 10 min (ou logo, se ainda não leu).
+    void RefreshAnne()
+    {
+        if (anneBusy || DateTime.Now < anneNext) return;
+        anneBusy = true;
+        InBackground(ui, () => { try { return AnnePro.Read(); } catch { return null; } }, r =>
+        {
+            anneBusy = false;
+            if (r != null)
+            {
+                // O que não respondeu desta vez fica com o valor anterior.
+                if (anne != null)
+                {
+                    if (r.KeyFw == null) { r.KeyFw = anne.KeyFw; r.LedFw = anne.LedFw; r.BleFw = anne.BleFw; }
+                    if (r.Hours < 0) r.Hours = anne.Hours;
+                    if (r.Percent < 0) { r.Percent = anne.Percent; r.MilliVolts = anne.MilliVolts; r.BatteryTime = anne.BatteryTime; }
+                }
+                anne = r;
+                anneNext = DateTime.Now.AddMinutes(r.Percent >= 0 && r.KeyFw != null ? 10 : 1);
+                RefreshBt();
+            }
+            else anneNext = DateTime.Now.AddSeconds(anne == null ? 30 : 60);
+        });
+    }
+
+    // O Windows às vezes guarda um valor errado para o Anne Pro 2 (ex.: 0% "carregando" depois de reconectar).
+    // Quando o próprio teclado informou a bateria há menos de 1 hora, vale o que ele disse.
+    void ApplyAnne()
+    {
+        if (anne == null || anne.Mac == null || anne.Percent < 0 || (DateTime.Now - anne.BatteryTime).TotalHours > 1) return;
+        foreach (var d in bt)
+        {
+            if (!d.Id.ToLowerInvariant().Contains(anne.Mac)) continue;
+            d.Percent = anne.Percent;
+            d.Charging = false;
+            if (anne.BatteryTime > d.Updated) d.Updated = anne.BatteryTime;
+        }
+    }
+
+    static string DescribeAnne()
+    {
+        try
+        {
+            if (!AnnePro.Present) return "Anne Pro 2 (Bluetooth): não encontrado";
+            AnneInfo a = AnnePro.Read();
+            if (a == null) return "Anne Pro 2 (Bluetooth): sem resposta (dormindo?)";
+            return "Anne Pro 2 (Bluetooth): mac=" + a.Mac + " firmware teclas=" + a.KeyFw + " led=" + a.LedFw + " ble=" + a.BleFw + " horas=" + a.Hours + " bateria=" + a.Percent + "% " + a.MilliVolts + "mV";
+        }
+        catch (Exception e) { return "Anne Pro 2 (Bluetooth): erro " + e.Message; }
     }
 
     bool IsShown(BtDevice d)
@@ -1188,6 +1346,12 @@ class App : ApplicationContext
             };
             c.Status = d.Charging ? "Carregando" : c.Stale ? "Sem conexão recente" : "Bluetooth";
             c.Detail = "Atualizado " + When(d.Updated);
+            if (anne != null && anne.Mac != null && d.Id.ToLowerInvariant().Contains(anne.Mac))
+            {
+                if (anne.KeyFw != null && !d.Charging) c.Status += " · firmware " + anne.KeyFw;
+                if (anne.MilliVolts > 0 && (DateTime.Now - anne.BatteryTime).TotalHours <= 1) c.Detail += "  ·  " + (anne.MilliVolts / 1000.0).ToString("0.00") + " V";
+                if (anne.Hours >= 0) c.Detail += "  ·  " + anne.Hours.ToString("N0", new System.Globalization.CultureInfo("pt-BR")) + " h de uso";
+            }
             list.Add(c);
         }
         return list;
@@ -1266,6 +1430,7 @@ class App : ApplicationContext
             foreach (var d in Bluetooth.List())
                 File.AppendAllText(Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "teste.txt"),
                     "\r\nBT " + d.Name + " " + d.Percent + "% carregando=" + d.Charging + " atualizado=" + d.Updated.ToString("dd/MM HH:mm") + " cat=" + d.Category);
+            File.AppendAllText(Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "teste.txt"), "\r\n" + DescribeAnne());
             return;
         }
         if (args.Length > 1 && args[0] == "--icons") { Icons.Preview(args[1]); return; }
@@ -1274,7 +1439,7 @@ class App : ApplicationContext
             // Desenha o painel e a janela de configuração em PNG, para conferir o visual.
             var cards = new List<DeviceCard> {
                 new DeviceCard { Glyph = "", Name = "Redragon M916 PRO", Percent = 82, Status = "~31 horas restantes", Detail = "Dongle 2.4G  ·  1000 Hz  ·  DPI 3/5  ·  4.02 V" },
-                new DeviceCard { Glyph = "", Name = "AP2", Percent = 100, Status = "Bluetooth", Detail = "Atualizado hoje 13:53" },
+                new DeviceCard { Glyph = "", Name = "AP2", Percent = 100, Status = "Bluetooth · firmware 2.36", Detail = "Atualizado hoje 13:53  ·  4.10 V  ·  12.529 h de uso" },
                 new DeviceCard { Glyph = "", Name = "8BitDo Ultimate 2C Wireless", Percent = 6, Stale = true, Status = "Sem conexão recente", Detail = "Atualizado 14/10 00:06" },
                 new DeviceCard { Glyph = "", Name = "Mouse carregando (exemplo)", Percent = 65, Charging = true, Status = "Carregando · antes do cabo 65%", Detail = "Cabo USB  ·  1000 Hz" } };
             Action<Form, string> snap = (f, name) =>
