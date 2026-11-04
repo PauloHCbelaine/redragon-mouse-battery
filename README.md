@@ -13,12 +13,14 @@ Testado no **Redragon M916 PRO 1K** (dongle 2.4G e cabo).
   verde (normal), laranja (≤ 30%), vermelho (≤ 15%), azul (carregando)
 - Carregando: mostra um raio com o último nível real de antes do cabo. Enquanto carrega, a voltagem sobe e a porcentagem que o mouse informa fica inflada, então o app não usa esse número. Quando termina de carregar, aparece "F"
 - Avisa com notificação em 20% e em 10%
-- **Dispositivos Bluetooth** (teclados, controles, fones…): mostra a bateria que o próprio Windows já guarda, cada um com seu ícone, que tem a barra em cima. Você escolhe quais aparecem em botão direito → "Dispositivos Bluetooth". Testado com o teclado Anne Pro 2. Com o cabo ligado, o teclado sai do Bluetooth e o Windows para de atualizar a bateria dele, então o ícone mostra o último valor, que fica cinza depois de 1 dia sem atualizar
+- **Dispositivos Bluetooth** (teclados, controles, fones…): mostra a bateria que o próprio Windows já guarda, cada um com seu ícone, que tem a barra em cima. Você escolhe quais aparecem em botão direito → "Dispositivos Bluetooth". Testado com o teclado Anne Pro 2. Com o dispositivo desconectado (ou o teclado no cabo, fora do Bluetooth), o ícone mostra o último valor, em cinza
 - **Configurar o mouse** sem o driver da Redragon (botão direito → "Configurar mouse…"): valores de DPI de cada nível (50 a 26000), quantidade de níveis, nível ativo, polling (125 a 1000 Hz), LOD e tempo do Peak Performance. O app grava só o que mudou e lê de volta para conferir
 - **Perfis do mouse:** salve combinações (ex.: "Jogo", "Trabalho") e troque com um clique pelo menu
 - **Anne Pro 2 pelo Bluetooth:** a bateria vem direto do teclado (o Windows às vezes guarda um valor errado, como "0% carregando"), e o card mostra a voltagem, a versão do firmware e as horas de uso, lidas com o mesmo protocolo do ObinsKit (só leitura; veja [`tools/annepro2-protocol.md`](tools/annepro2-protocol.md))
 - **Cor do teclado Anne Pro 2** (pelo cabo USB): cores prontas ou qualquer cor, usando o comando descoberto pelo [Annemone](https://github.com/illixion/Annemone). Isso substitui a iluminação configurada no ObinsKit
 - Clique no ícone para abrir o **painel**: um cartão por dispositivo, com porcentagem, barra de bateria, voltagem, tempo restante estimado, conexão (cabo/dongle), polling rate e nível de DPI ativo
+- **Estado de cada dispositivo** no painel: **Conectado**, **Em repouso** (o mouse e o teclado dormem sozinhos quando ficam parados e acordam ao mexer ou apertar uma tecla) ou **Desconectado** (dongle fora do PC, ou Bluetooth desligado). Desconectado, o card fica cinza e mostra o último nível de bateria e quando ele foi lido
+- **Tempo restante** do mouse, do Anne Pro 2 e dos outros dispositivos Bluetooth. O app mede quanto tempo cada ponto de bateria dura, contando só o tempo em que o dispositivo ficou conectado com o PC ligado (PC desligado ou suspenso não entra na conta). A medição fica guardada, então vale depois de reiniciar o PC, e a da última descarga continua valendo depois de uma recarga, até a nova ter caído uns 5%
 - Visual no estilo do Windows 11, que segue o tema claro/escuro e a cor de destaque do sistema (e acompanha quando você troca)
 - Aviso quando o mouse termina de carregar
 - Abrir o app de novo, com ele já rodando, mostra o painel
@@ -88,7 +90,7 @@ Baseado no trabalho de [MouseBatteryIndicator](https://github.com/xIIyassineIIx/
 
 ## English
 
-Tray app showing the battery percentage of Compx-based Redragon wireless mice (tested on the M916 PRO 1K). It alerts at 20% and 10%, has a configurable refresh interval (5 s to 5 min), and shows voltage, an estimated time remaining, polling rate and the active DPI level. It only sends **read** commands. Download `MouseBattery.exe` from Releases, or build it with `build.bat` (no SDK needed).
+Tray app showing the battery percentage of Compx-based Redragon wireless mice (tested on the M916 PRO 1K). It alerts at 20% and 10%, has a configurable refresh interval (5 s to 5 min), and shows voltage, an estimated time remaining, polling rate and the active DPI level. Each device shows whether it is connected, asleep or disconnected (with its last known battery level). It only sends **read** commands. Download `MouseBattery.exe` from Releases, or build it with `build.bat` (no SDK needed).
 
 ## Licença / License
 

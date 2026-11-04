@@ -11,6 +11,7 @@ using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Reflection;
 using System.Text.RegularExpressions;
@@ -21,8 +22,8 @@ using Microsoft.Win32.SafeHandles;
 [assembly: AssemblyDescription("Bateria e configuração de mouses Redragon, teclado Anne Pro 2 e dispositivos Bluetooth")]
 [assembly: AssemblyProduct("Mouse Battery Redragon")]
 [assembly: AssemblyCopyright("MIT · github.com/PauloHCbelaine/redragon-mouse-battery")]
-[assembly: AssemblyVersion("1.7.0.0")]
-[assembly: AssemblyFileVersion("1.7.0.0")]
+[assembly: AssemblyVersion("1.8.0.0")]
+[assembly: AssemblyFileVersion("1.8.0.0")]
 
 static class Hid
 {
@@ -500,6 +501,102 @@ static class AnnePro
     [ThreadStatic] static byte[] pendingBuf;
 }
 
+// Estimativa de duração da bateria, uma por dispositivo.
+// Conta só o tempo em que o dispositivo esteve conectado com o PC ligado (o app aberto): PC desligado ou
+// em suspensão não entra na conta. Fica guardada no registro, então vale depois de reiniciar, e a taxa
+// medida numa descarga continua valendo na próxima até ela ter caído o bastante para medir de novo.
+class Drain
+{
+    const string Root = @"Software\MouseBatteryRedragon\Drain";
+    const int MinDrop = 5;          // pontos de queda para medir (com menos, o erro do % inteiro pesa demais)
+    const double MaxGapHours = 10.0 / 60; // intervalo maior que isso entre leituras = PC estava suspenso
+
+    string name;
+    int rise;                       // subida que conta como "carregou"
+    double hours;                   // horas conectado, acumuladas desde sempre
+    int startPct = -1, lastPct = -1; double startHours;
+    double perPct = -1;             // horas por ponto de bateria, da última medição boa
+    DateTime lastTick, lastSave;
+
+    // `rise`: quanto o % precisa subir para valer como recarga. Para % calculado pela voltagem (Anne Pro 2)
+    // ele é maior, porque a voltagem sobe um pouco sozinha quando a luz do teclado apaga.
+    public Drain(string name, int rise)
+    {
+        this.rise = rise;
+        this.name = Regex.Replace(name, "[^A-Za-z0-9_&-]", "_");
+        try
+        {
+            using (var k = Registry.CurrentUser.OpenSubKey(Root + "\\" + this.name))
+                if (k != null)
+                {
+                    hours = Num(k.GetValue("Hours"), 0); startHours = Num(k.GetValue("StartHours"), 0);
+                    perPct = Num(k.GetValue("PerPct"), -1);
+                    startPct = (int)Num(k.GetValue("StartPct"), -1); lastPct = (int)Num(k.GetValue("LastPct"), -1);
+                }
+        }
+        catch { }
+    }
+
+    static double Num(object v, double def)
+    {
+        double d;
+        return v != null && double.TryParse(v.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out d) ? d : def;
+    }
+
+    // Chamado a cada atualização do app: soma o tempo enquanto o dispositivo está conectado.
+    public void Tick(bool connected, DateTime now)
+    {
+        if (connected && lastTick != DateTime.MinValue)
+        {
+            double h = (now - lastTick).TotalHours;
+            if (h > 0) hours += Math.Min(h, MaxGapHours);
+        }
+        lastTick = now;
+        if ((now - lastSave).TotalMinutes >= 5) Save();
+    }
+
+    // Uma leitura de bateria. Carregando, ou subiu bastante (carregou longe do app): começa outra descarga.
+    public void Reading(int pct, bool charging)
+    {
+        if (pct < 0) return;
+        if (charging) { if (startPct >= 0) { startPct = lastPct = -1; Save(); } return; }
+        if (startPct < 0 || pct >= lastPct + rise) { startPct = lastPct = pct; startHours = hours; Save(); return; }
+        if (pct >= lastPct) return;
+        lastPct = pct;
+        double elapsed = hours - startHours;
+        // Meia hora no mínimo, para uma queda de voltagem momentânea não virar taxa.
+        if (startPct - pct >= MinDrop && elapsed >= 0.5) perPct = elapsed / (startPct - pct);
+        Save();
+    }
+
+    // Horas de uso restantes, ou -1 se ainda não deu para medir.
+    public double HoursLeft(int pct) { return perPct > 0 && pct >= 0 ? perPct * pct : -1; }
+
+    public static string Text(double h)
+    {
+        if (h < 0) return null;
+        if (h < 1) return "menos de 1 h";
+        return "~" + (h < 100 ? h.ToString("0") + " h" : (h / 24).ToString("0", CultureInfo.GetCultureInfo("pt-BR")) + " dias");
+    }
+
+    void Save()
+    {
+        lastSave = DateTime.Now;
+        try
+        {
+            using (var k = Registry.CurrentUser.CreateSubKey(Root + "\\" + name))
+            {
+                k.SetValue("Hours", hours.ToString("R", CultureInfo.InvariantCulture));
+                k.SetValue("StartHours", startHours.ToString("R", CultureInfo.InvariantCulture));
+                k.SetValue("PerPct", perPct.ToString("R", CultureInfo.InvariantCulture));
+                k.SetValue("StartPct", startPct.ToString(CultureInfo.InvariantCulture));
+                k.SetValue("LastPct", lastPct.ToString(CultureInfo.InvariantCulture));
+            }
+        }
+        catch { }
+    }
+}
+
 // Perfis guardados no registro do usuário.
 static class Profiles
 {
@@ -524,7 +621,7 @@ static class Profiles
 // propriedades do próprio dispositivo. Basta ler, sem falar com o aparelho.
 class BtDevice
 {
-    public string Id, Name, Category; public int Percent; public bool Charging; public DateTime Updated;
+    public string Id, Name, Category; public int Percent; public bool Charging, Connected; public DateTime Updated;
 }
 
 static class Bluetooth
@@ -548,6 +645,7 @@ static class Bluetooth
     static DEVPROPKEY KName = new DEVPROPKEY("A45C254E-DF1C-4EFD-8020-67D146A850E0", 14);     // FriendlyName
     static DEVPROPKEY KInstance = new DEVPROPKEY("78C34FC8-104A-4ACA-9EA4-524D52996E57", 256); // InstanceId
     static DEVPROPKEY KCategory = new DEVPROPKEY("78C34FC8-104A-4ACA-9EA4-524D52996E57", 90);  // DeviceContainer_Category
+    static DEVPROPKEY KConnected = new DEVPROPKEY("83DA6326-97A6-4088-9453-A1923F573B29", 15); // conectado agora (o pareado continua na lista)
 
     static byte[] Get(IntPtr set, ref SP_DEVINFO_DATA d, DEVPROPKEY k)
     {
@@ -579,6 +677,8 @@ static class Bluetooth
                 dev.Name = Str(Get(set, ref d, KName)) ?? "Bluetooth";
                 dev.Id = Str(Get(set, ref d, KInstance)) ?? dev.Name;
                 dev.Category = Str(Get(set, ref d, KCategory)) ?? "";
+                byte[] con = Get(set, ref d, KConnected);
+                dev.Connected = con != null && con.Length > 0 && con[0] != 0;
                 list.Add(dev);
             }
         }
@@ -621,7 +721,15 @@ class App : ApplicationContext
     bool mouseOnline;
     int mouseRealPct = -1; DateTime mouseRealTime; // último nível real (sem cabo)
     bool warned20, warned10, notifiedFull;
-    DateTime dischargeStart; int dischargeStartPct = -1;
+    Drain mouseDrain = new Drain("mouse", 5);
+    Dictionary<string, Drain> drains = new Dictionary<string, Drain>();
+
+    Drain DrainFor(string key, int rise)
+    {
+        Drain d;
+        if (!drains.TryGetValue(key, out d)) drains[key] = d = new Drain(key, rise);
+        return d;
+    }
 
     // Bluetooth: um ícone por dispositivo escolhido.
     ContextMenuStrip menu = new ContextMenuStrip();
@@ -631,7 +739,7 @@ class App : ApplicationContext
     SettingsWindow settingsForm;
     Dictionary<string, NotifyIcon> btTrays = new Dictionary<string, NotifyIcon>();
     List<BtDevice> bt = new List<BtDevice>();
-    AnneInfo anne; bool anneBusy; DateTime anneNext;
+    AnneInfo anne; bool anneBusy, anneSilent; DateTime anneNext;
     HashSet<string> btWarned = new HashSet<string>();
     HashSet<string> btShown, btHidden; // escolhas do usuário; sem escolha = mostra se atualizou nos últimos 3 dias
 
@@ -789,7 +897,7 @@ class App : ApplicationContext
         sb.AppendLine();
 
         sb.AppendLine("== Bluetooth (bateria guardada pelo Windows) ==");
-        try { foreach (var d in Bluetooth.List()) sb.AppendLine(d.Name + ": " + d.Percent + "% atualizado " + d.Updated.ToString("yyyy-MM-dd HH:mm") + " categoria=" + d.Category); }
+        try { foreach (var d in Bluetooth.List()) sb.AppendLine(d.Name + ": " + d.Percent + "% conectado=" + d.Connected + " atualizado " + d.Updated.ToString("yyyy-MM-dd HH:mm") + " categoria=" + d.Category); }
         catch (Exception e) { sb.AppendLine("erro: " + e.Message); }
         sb.AppendLine(DescribeAnne());
         sb.AppendLine();
@@ -995,18 +1103,27 @@ class App : ApplicationContext
         try { bt = Bluetooth.List(); } catch { return; }
         ApplyAnne();
         var seen = new HashSet<string>();
+        DateTime now = DateTime.Now;
         foreach (var d in bt)
         {
             seen.Add(d.Id);
+            // Duração: soma o tempo conectado. O Anne Pro 2 recebe as leituras em RefreshAnne (o valor do
+            // Windows para ele não é confiável); os outros, a bateria do Windows enquanto estão conectados.
+            bool isAnne = IsAnne(d);
+            Drain dr = DrainOf(d);
+            dr.Tick(d.Connected, now);
+            if (!isAnne && d.Connected) dr.Reading(d.Percent, d.Charging);
+
             NotifyIcon t;
             if (!btTrays.TryGetValue(d.Id, out t)) { t = new NotifyIcon(); Attach(t); btTrays[d.Id] = t; }
-            bool stale = (DateTime.Now - d.Updated).TotalHours > 24;
-            Color c = stale ? Color.Gray : d.Charging ? Color.DeepSkyBlue : d.Percent <= 15 ? Color.Red : d.Percent <= 30 ? Color.Orange : Color.LimeGreen;
+            bool offline = !d.Connected;
+            Color c = offline ? Color.Gray : d.Charging ? Color.DeepSkyBlue : LevelColor(d.Percent);
+            string state = d.Charging ? "carregando" : offline ? "desconectado" : isAnne && anneSilent ? "em repouso" : "conectado";
             SetIcon(t, Icons.Bluetooth(d.Charging ? "" : d.Percent >= 100 ? "F" : d.Percent.ToString(), c, d.Charging),
-                d.Name + ": " + (d.Charging ? "carregando" : d.Percent + "%") + "\nAtualizado " + When(d.Updated));
+                d.Name + ": " + d.Percent + "% · " + state + "\n" + (offline ? "Última leitura " : "Atualizado ") + When(d.Updated));
             t.Visible = IsShown(d);
 
-            if (d.Charging || d.Percent > 25 || stale) btWarned.Remove(d.Id);
+            if (d.Charging || d.Percent > 25 || offline) btWarned.Remove(d.Id);
             else if (d.Percent <= 20 && t.Visible && btWarned.Add(d.Id))
                 t.ShowBalloonTip(8000, "Bateria baixa: " + d.Name, "Restam " + d.Percent + "%.", ToolTipIcon.Info);
         }
@@ -1017,16 +1134,23 @@ class App : ApplicationContext
         RefreshAnne();
     }
 
-    // Firmware e horas de uso do Anne Pro 2. Mudam pouco, então lê a cada 10 min (ou logo, se ainda não leu).
+    // Bateria, firmware e horas ligado do Anne Pro 2, lidos do próprio teclado enquanto ele está conectado.
+    // Sem resposta com o Bluetooth conectado = teclado em repouso (acorda numa tecla); aí tenta a cada 30 s.
     void RefreshAnne()
     {
         if (anneBusy || DateTime.Now < anneNext) return;
+        BtDevice dev = null;
+        foreach (var d in bt) if (IsAnne(d) || anne == null && d.Name == "AnnePro2") dev = d;
+        if (dev != null && !dev.Connected) { anneSilent = false; return; } // desconectado: nem tenta
         anneBusy = true;
         InBackground(ui, () => { try { return AnnePro.Read(); } catch { return null; } }, r =>
         {
             anneBusy = false;
+            bool wasSilent = anneSilent;
+            anneSilent = r == null && AnnePro.Present;
             if (r != null)
             {
+                bool freshBattery = r.Percent >= 0;
                 // O que não respondeu desta vez fica com o valor anterior.
                 if (anne != null)
                 {
@@ -1035,24 +1159,39 @@ class App : ApplicationContext
                     if (r.Percent < 0) { r.Percent = anne.Percent; r.MilliVolts = anne.MilliVolts; r.BatteryTime = anne.BatteryTime; }
                 }
                 anne = r;
-                anneNext = DateTime.Now.AddMinutes(r.Percent >= 0 && r.KeyFw != null ? 10 : 1);
+                if (freshBattery && r.Mac != null)
+                {
+                    DrainFor("anne_" + r.Mac, 15).Reading(r.Percent, false);
+                    Save("AnneLast", r.Mac + ";" + r.Percent + ";" + r.MilliVolts + ";" + r.BatteryTime.Ticks);
+                }
+                // Acordado: confere de novo em 5 min (perguntar sempre poderia impedir o teclado de dormir).
+                anneNext = DateTime.Now.AddMinutes(r.KeyFw != null && freshBattery ? 5 : 1);
                 RefreshBt();
             }
-            else anneNext = DateTime.Now.AddSeconds(anne == null ? 30 : 60);
+            else
+            {
+                anneNext = DateTime.Now.AddSeconds(30);
+                if (!wasSilent && anneSilent) RefreshBt();
+            }
         });
     }
 
+    bool IsAnne(BtDevice d) { return anne != null && anne.Mac != null && d.Id.ToLowerInvariant().Contains(anne.Mac); }
+
+    Drain DrainOf(BtDevice d) { return IsAnne(d) ? DrainFor("anne_" + anne.Mac, 15) : DrainFor("bt_" + d.Id, 5); }
+
     // O Windows às vezes guarda um valor errado para o Anne Pro 2 (ex.: 0% "carregando" depois de reconectar).
-    // Quando o próprio teclado informou a bateria há menos de 1 hora, vale o que ele disse.
+    // Vale o que o próprio teclado informou, a não ser que o Windows tenha um valor bem mais novo.
     void ApplyAnne()
     {
-        if (anne == null || anne.Mac == null || anne.Percent < 0 || (DateTime.Now - anne.BatteryTime).TotalHours > 1) return;
+        if (anne == null || anne.Mac == null || anne.Percent < 0) return;
         foreach (var d in bt)
         {
-            if (!d.Id.ToLowerInvariant().Contains(anne.Mac)) continue;
+            if (!IsAnne(d)) continue;
+            if (anne.BatteryTime < d.Updated.AddHours(-1) && d.Percent > 0 && !d.Charging) continue;
             d.Percent = anne.Percent;
             d.Charging = false;
-            if (anne.BatteryTime > d.Updated) d.Updated = anne.BatteryTime;
+            d.Updated = anne.BatteryTime;
         }
     }
 
@@ -1186,10 +1325,15 @@ class App : ApplicationContext
 
     void Update(MouseReading r)
     {
+        mouseDrain.Tick(compxPresent, DateTime.Now);
         if (!r.Ok)
         {
+            // Dongle no PC, mas o mouse não responde: está em repouso (ou desligado no botão).
+            // O ícone continua com o último nível, que ainda vale; sem dongle, fica cinza.
             string old = mouseRealPct >= 0 ? " (último: " + mouseRealPct + "%)" : "";
-            SetIcon(mouseTray, Icons.Mouse("?", Color.Gray, false), "Mouse desligado/dormindo" + old);
+            Color c = !r.Present || mouseRealPct < 0 ? Color.Gray : LevelColor(mouseRealPct);
+            SetIcon(mouseTray, Icons.Mouse(mouseRealPct >= 0 ? (mouseRealPct >= 100 ? "F" : mouseRealPct.ToString()) : "?", c, false),
+                (r.Present ? "Mouse em repouso" : "Mouse desconectado") + old);
             return;
         }
         // Abriu o app com o mouse já carregado no cabo: não precisa avisar.
@@ -1198,9 +1342,10 @@ class App : ApplicationContext
         string when = DateTime.Now.ToString("HH:mm:ss");
 
         if (!r.Charging) notifiedFull = false;
+        mouseDrain.Reading(r.Percent, r.Charging);
         if (r.Charging)
         {
-            dischargeStartPct = -1; warned20 = warned10 = false;
+            warned20 = warned10 = false;
             if (r.Percent >= 100)
             {
                 SetIcon(mouseTray, Icons.Mouse("F", Color.DeepSkyBlue, false), "Mouse: carregado\n" + when);
@@ -1218,11 +1363,11 @@ class App : ApplicationContext
 
         mouseRealPct = r.Percent; mouseRealTime = r.Time;
         Save("MouseLastPct", r.Percent);
-        TrackDischarge(r);
+        Save("MouseLastTime", r.Time.Ticks.ToString());
 
-        Color c = r.Percent <= 15 ? Color.Red : r.Percent <= 30 ? Color.Orange : Color.LimeGreen;
-        SetIcon(mouseTray, Icons.Mouse(r.Percent >= 100 ? "F" : r.Percent.ToString(), c, false),
-            "Mouse: " + r.Percent + "%\n" + (r.Wired ? "Cabo" : "Dongle 2.4G") + " · " + when);
+        string rem = Drain.Text(mouseDrain.HoursLeft(r.Percent));
+        SetIcon(mouseTray, Icons.Mouse(r.Percent >= 100 ? "F" : r.Percent.ToString(), LevelColor(r.Percent), false),
+            "Mouse: " + r.Percent + "%" + (rem != null ? " · " + rem : "") + "\n" + (r.Wired ? "Cabo" : "Dongle 2.4G") + " · " + when);
 
         if (r.Percent > 25) { warned20 = warned10 = false; return; }
         if (r.Percent <= 10 && !warned10)
@@ -1237,19 +1382,13 @@ class App : ApplicationContext
         }
     }
 
-    void TrackDischarge(MouseReading r)
-    {
-        if (dischargeStartPct < 0 || r.Percent > dischargeStartPct) { dischargeStart = r.Time; dischargeStartPct = r.Percent; }
-    }
+    static Color LevelColor(int pct) { return pct <= 15 ? Color.Red : pct <= 30 ? Color.Orange : Color.LimeGreen; }
 
-    // Estimativa só depois de cair pelo menos 5 pontos, para não chutar.
-    string Remaining()
+    // Texto da estimativa para o card (null enquanto carrega).
+    static string Remaining(Drain d, int pct)
     {
-        if (mouse == null || mouse.Charging || dischargeStartPct < 0) return null;
-        int drop = dischargeStartPct - mouse.Percent;
-        if (drop < 5) return "calculando (precisa cair uns 5%)";
-        double h = (mouse.Time - dischargeStart).TotalHours / drop * mouse.Percent;
-        return h >= 24 ? "~" + (h / 24).ToString("0.0") + " dias" : "~" + h.ToString("0") + " horas";
+        string t = Drain.Text(d.HoursLeft(pct));
+        return t != null ? t + " restantes" : pct >= 0 ? "medindo a duração" : null;
     }
 
     // ---------- detalhes ----------
@@ -1286,14 +1425,24 @@ class App : ApplicationContext
     {
         var list = new List<DeviceCard>();
         var m = new DeviceCard { Glyph = "", Name = mouseName };
-        if (mouse == null || !mouseOnline)
+        string lastSeen = mouseRealTime != DateTime.MinValue ? "Última leitura " + When(mouseRealTime) : "";
+        if (!compxPresent && !mouseOnline)
         {
-            m.Percent = mouseRealPct; m.Stale = true;
-            m.Status = "Desligado ou dormindo";
-            m.Detail = mouseRealPct >= 0 ? "Último nível conhecido: " + mouseRealPct + "%" : "Mexa o mouse para ele acordar";
+            // Dongle fora do PC: mostra o último nível, em cinza.
+            m.State = DeviceCard.Offline; m.Percent = mouseRealPct; m.Stale = true;
+            m.Status = "dongle fora do PC";
+            m.Detail = lastSeen;
+        }
+        else if (mouse == null || !mouseOnline)
+        {
+            // O mouse dorme sozinho depois de um tempo parado e acorda quando mexe.
+            m.State = DeviceCard.Asleep; m.Percent = mouseRealPct;
+            m.Status = Remaining(mouseDrain, mouseRealPct) ?? "mexa o mouse para acordar";
+            m.Detail = lastSeen.Length > 0 ? lastSeen + "  ·  acorda ao mexer" : "Mexa o mouse para ele acordar";
         }
         else
         {
+            m.State = DeviceCard.Connected;
             m.Charging = mouse.Charging;
             if (mouse.Charging)
             {
@@ -1303,8 +1452,7 @@ class App : ApplicationContext
             else
             {
                 m.Percent = mouse.Percent;
-                string rem = Remaining();
-                m.Status = rem == null ? "Em uso" : rem.StartsWith("~") ? rem + " restantes" : "Calculando o tempo restante…";
+                m.Status = Remaining(mouseDrain, mouse.Percent);
             }
             var parts = new List<string> { mouse.Wired ? "Cabo USB" : "Dongle 2.4G" };
             if (mouse.PollingHz > 0) parts.Add(mouse.PollingHz + " Hz");
@@ -1312,21 +1460,22 @@ class App : ApplicationContext
             parts.Add((mouse.MilliVolts / 1000.0).ToString("0.00") + " V");
             m.Detail = string.Join("  ·  ", parts.ToArray());
         }
-        if (compxPresent || mouseOnline) list.Add(m);
+        if (compxPresent || mouseOnline || mouseRealPct >= 0) list.Add(m);
 
         if (ajazz != null && ajazz.Present)
         {
             var a = new DeviceCard { Glyph = "", Name = "AJAZZ (AJ139 / AJ159 / AJ179)" };
             if (ajazz.Ok)
             {
+                a.State = DeviceCard.Connected;
                 a.Percent = ajazz.Percent; a.Charging = ajazz.Charging;
-                a.Status = ajazz.Charging ? "Carregando" : "Em uso";
+                a.Status = ajazz.Charging ? "Carregando" : "";
                 a.Detail = (ajazz.Wired ? "Cabo USB" : "Dongle 2.4G") + "  ·  leitura " + ajazz.Time.ToString("HH:mm:ss");
             }
             else
             {
-                a.Percent = ajazzLastPct; a.Stale = true;
-                a.Status = "Dormindo ou desligado";
+                a.State = DeviceCard.Asleep; a.Percent = ajazzLastPct;
+                a.Status = "mexa o mouse para acordar";
                 a.Detail = ajazzLastPct >= 0 ? "Último nível: " + ajazzLastPct + "% às " + ajazzLastTime.ToString("HH:mm") : "Mexa o mouse para ele acordar";
             }
             list.Add(a);
@@ -1339,19 +1488,29 @@ class App : ApplicationContext
             var c = new DeviceCard
             {
                 Name = d.Name, Percent = d.Percent, Charging = d.Charging,
-                Stale = (DateTime.Now - d.Updated).TotalHours > 24,
+                Stale = !d.Connected,
                 Glyph = cat.Contains("keyboard") || d.Name == "AP2" ? "" :
                         cat.Contains("gam") || cat.Contains("controller") || cat.Contains("8bitdo") ? "" :
                         cat.Contains("audio") || cat.Contains("head") || cat.Contains("buds") ? "" : "",
             };
-            c.Status = d.Charging ? "Carregando" : c.Stale ? "Sem conexão recente" : "Bluetooth";
-            c.Detail = "Atualizado " + When(d.Updated);
-            if (anne != null && anne.Mac != null && d.Id.ToLowerInvariant().Contains(anne.Mac))
+            bool isAnne = IsAnne(d);
+            c.State = !d.Connected ? DeviceCard.Offline : isAnne && anneSilent ? DeviceCard.Asleep : DeviceCard.Connected;
+            if (d.Charging) c.Status = "Carregando";
+            else if (!d.Connected) c.Status = "Bluetooth";
+            else
             {
-                if (anne.KeyFw != null && !d.Charging) c.Status += " · firmware " + anne.KeyFw;
-                if (anne.MilliVolts > 0 && (DateTime.Now - anne.BatteryTime).TotalHours <= 1) c.Detail += "  ·  " + (anne.MilliVolts / 1000.0).ToString("0.00") + " V";
-                if (anne.Hours >= 0) c.Detail += "  ·  " + anne.Hours.ToString("N0", new System.Globalization.CultureInfo("pt-BR")) + " h de uso";
+                // Estimativa: para o Anne Pro 2 sempre (a bateria vem dele); para os outros, só quando já mediu.
+                string rem = Remaining(DrainOf(d), d.Percent);
+                c.Status = isAnne ? rem : rem != null && rem.StartsWith("~") ? rem : "Bluetooth";
             }
+            var parts = new List<string> { isAnne ? When(d.Updated) : (d.Connected ? "Atualizado " : "Última leitura ") + When(d.Updated) };
+            if (isAnne)
+            {
+                if (anne.MilliVolts > 0 && d.Connected) parts.Add((anne.MilliVolts / 1000.0).ToString("0.00") + " V");
+                if (anne.KeyFw != null) parts.Add("fw " + anne.KeyFw);
+                if (anne.Hours >= 0) parts.Add(anne.Hours.ToString("N0", CultureInfo.GetCultureInfo("pt-BR")) + " h ligado");
+            }
+            c.Detail = string.Join("  ·  ", parts.ToArray());
             list.Add(c);
         }
         return list;
@@ -1390,8 +1549,20 @@ class App : ApplicationContext
     void LoadSaved()
     {
         object v = Load("MouseLastPct"); if (v is int) mouseRealPct = (int)v;
+        mouseRealTime = Ticks(Load("MouseLastTime"));
+        // Última bateria lida do Anne Pro 2: "mac;%;mV;ticks". Vale enquanto ele está desconectado.
+        string[] a = (Load("AnneLast") as string ?? "").Split(';');
+        int pct, mv;
+        if (a.Length == 4 && int.TryParse(a[1], out pct) && int.TryParse(a[2], out mv))
+            anne = new AnneInfo { Mac = a[0], Percent = pct, MilliVolts = mv, BatteryTime = Ticks(a[3]), Time = Ticks(a[3]) };
         btShown = new HashSet<string>(Load("BtShown") as string[] ?? new string[0]);
         btHidden = new HashSet<string>(Load("BtHidden") as string[] ?? new string[0]);
+    }
+
+    static DateTime Ticks(object v)
+    {
+        long t;
+        return v != null && long.TryParse(v.ToString(), out t) && t > 0 && t < DateTime.MaxValue.Ticks ? new DateTime(t) : DateTime.MinValue;
     }
 
     static int LoadInterval()
@@ -1429,7 +1600,7 @@ class App : ApplicationContext
                 : "sem leitura");
             foreach (var d in Bluetooth.List())
                 File.AppendAllText(Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "teste.txt"),
-                    "\r\nBT " + d.Name + " " + d.Percent + "% carregando=" + d.Charging + " atualizado=" + d.Updated.ToString("dd/MM HH:mm") + " cat=" + d.Category);
+                    "\r\nBT " + d.Name + " " + d.Percent + "% carregando=" + d.Charging + " conectado=" + d.Connected + " atualizado=" + d.Updated.ToString("dd/MM HH:mm") + " cat=" + d.Category);
             File.AppendAllText(Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "teste.txt"), "\r\n" + DescribeAnne());
             return;
         }
@@ -1438,9 +1609,9 @@ class App : ApplicationContext
         {
             // Desenha o painel e a janela de configuração em PNG, para conferir o visual.
             var cards = new List<DeviceCard> {
-                new DeviceCard { Glyph = "", Name = "Redragon M916 PRO", Percent = 82, Status = "~31 horas restantes", Detail = "Dongle 2.4G  ·  1000 Hz  ·  DPI 3/5  ·  4.02 V" },
-                new DeviceCard { Glyph = "", Name = "AP2", Percent = 100, Status = "Bluetooth · firmware 2.36", Detail = "Atualizado hoje 13:53  ·  4.10 V  ·  12.529 h de uso" },
-                new DeviceCard { Glyph = "", Name = "8BitDo Ultimate 2C Wireless", Percent = 6, Stale = true, Status = "Sem conexão recente", Detail = "Atualizado 14/10 00:06" },
+                new DeviceCard { Glyph = "", Name = "Redragon M916 PRO", Percent = 82, State = DeviceCard.Connected, Status = "~31 h restantes", Detail = "Dongle 2.4G  ·  1000 Hz  ·  DPI 3/5  ·  4.02 V" },
+                new DeviceCard { Glyph = "", Name = "AnnePro2", Percent = 94, State = DeviceCard.Asleep, Status = "~5 dias restantes", Detail = "hoje 16:52  ·  4.06 V  ·  fw 2.36  ·  12.529 h ligado" },
+                new DeviceCard { Glyph = "", Name = "8BitDo Ultimate 2C Wireless", Percent = 55, Stale = true, State = DeviceCard.Offline, Status = "Bluetooth", Detail = "Última leitura hoje 13:33" },
                 new DeviceCard { Glyph = "", Name = "Mouse carregando (exemplo)", Percent = 65, Charging = true, Status = "Carregando · antes do cabo 65%", Detail = "Cabo USB  ·  1000 Hz" } };
             Action<Form, string> snap = (f, name) =>
             {

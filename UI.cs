@@ -435,6 +435,9 @@ class DeviceCard
     public string Glyph = "", Name = "", Detail = "", Status = "";
     public int Percent = -1;      // -1 = desconhecido
     public bool Charging, Stale;
+    public int State;             // 0 = sem estado, ou Connected / Asleep / Offline
+    public const int Connected = 1, Asleep = 2, Offline = 3;
+    public static readonly string[] StateNames = { "", "Conectado", "Em repouso", "Desconectado" };
 }
 
 class Flyout : Form
@@ -536,7 +539,20 @@ class Flyout : Form
 
         int nameW = right - x - ps.Width - (c.Charging ? 30 : 8);
         Theme.DrawText(g, c.Name, Theme.Semibold(10.5f), new Rectangle(x, r.Y + 13, nameW, 20), Theme.Text, TextFormatFlags.Left);
-        Theme.DrawText(g, c.Status, Theme.Font(8.5f), new Rectangle(x, r.Y + 32, nameW, 16), c.Charging ? Theme.Charge : Theme.Sub, TextFormatFlags.Left);
+        // Estado (bolinha + nome) e, depois, o status.
+        int sx = x;
+        if (c.State > 0 && !c.Charging)
+        {
+            Color sc = c.State == DeviceCard.Connected ? Theme.Level(100, false, false)
+                     : c.State == DeviceCard.Asleep ? Color.FromArgb(Theme.Dark ? 240 : 205, Theme.Dark ? 170 : 130, 0) : Theme.Sub;
+            using (var b = new SolidBrush(sc)) g.FillEllipse(b, sx, r.Y + 37, 7, 7);
+            sx += 11;
+            string sn = DeviceCard.StateNames[c.State];
+            Theme.DrawText(g, sn, Theme.Semibold(8.5f), new Rectangle(sx, r.Y + 32, nameW - 11, 16), sc, TextFormatFlags.Left);
+            sx += TextRenderer.MeasureText(g, sn, Theme.Semibold(8.5f), Size.Empty, TextFormatFlags.NoPadding).Width + 2;
+        }
+        string st = c.State > 0 && !c.Charging && c.Status.Length > 0 ? "·  " + c.Status : c.Status;
+        Theme.DrawText(g, st, Theme.Font(8.5f), new Rectangle(sx + (sx > x ? 4 : 0), r.Y + 32, x + nameW - sx, 16), c.Charging ? Theme.Charge : Theme.Sub, TextFormatFlags.Left);
 
         // Barra de bateria.
         var track = new RectangleF(x, r.Y + 52, right - x, 6);
