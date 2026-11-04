@@ -1,4 +1,4 @@
-# Redragon Mouse Battery
+# Mouse Battery
 
 Monitor de bateria leve para a bandeja do Windows, para mouses sem fio **Redragon** com chip **Compx** (USB VID `3554`).
 Testado no **Redragon M916 PRO 1K** (dongle 2.4G e cabo).
