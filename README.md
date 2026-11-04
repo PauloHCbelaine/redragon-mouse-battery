@@ -47,6 +47,14 @@ build.bat
 
 Ele usa o compilador C# que já vem no Windows (`%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe`).
 
+## AJAZZ (experimental)
+
+Mouses AJAZZ da família com chip Telink: **AJ139 V2 PRO**, AJ139 PRO, AJ159, AJ159 MC e AJ179 (inclusive o AJ179 V2 MAX), pelo dongle (`249A:5C2F` / `248A:5C2F`) ou no cabo (`248A:5C2E` / `5D2E` / `5E2E`). Só a bateria é lida. O app manda o mesmo pedido de leitura que o app oficial da AJAZZ e não grava nada no mouse.
+
+Protocolo confirmado no AJ179 V2 MAX por [HaloBattery #246](https://github.com/HeyOkay/HaloBattery/pull/246). Os IDs do AJ139 V2 PRO vêm do arquivo de configuração do driver oficial, documentado em [ajazz-control-center](https://github.com/Aiacos/ajazz-control-center). **Ainda não foi testado num AJ139 V2.** Se não funcionar, use **botão direito → Gerar diagnóstico** e abra uma issue com o arquivo que aparece na Área de Trabalho.
+
+Os AJAZZ com chip Compx (**AJ199**) usam o mesmo protocolo do Redragon e devem funcionar como ele.
+
 ## Outros modelos
 
 Outros mouses Redragon, e de outras marcas com chip Compx (VID `3554`), provavelmente funcionam também. Para descobrir, rode `MouseBattery.exe --test`: ele grava a leitura em `teste.txt`, na mesma pasta. Se funcionar ou não funcionar no seu modelo, abra uma issue com o nome do mouse.

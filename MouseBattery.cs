@@ -1,5 +1,5 @@
-// Monitor de bateria na bandeja do Windows para mouses Redragon com chip Compx (VID 0x3554),
-// testado no M916 PRO 1K. Só LÊ informações; nunca altera nenhuma configuração do mouse.
+﻿// Monitor de bateria na bandeja do Windows para mouses Redragon com chip Compx (VID 0x3554),
+// testado no M916 PRO 1K. SÃ³ LÃŠ informaÃ§Ãµes; nunca altera nenhuma configuraÃ§Ã£o do mouse.
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -18,11 +18,11 @@ using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
 
 [assembly: AssemblyTitle("Mouse Battery Redragon")]
-[assembly: AssemblyDescription("Bateria e configuração de mouses Redragon, teclado Anne Pro 2 e dispositivos Bluetooth")]
+[assembly: AssemblyDescription("Bateria e configuraÃ§Ã£o de mouses Redragon, teclado Anne Pro 2 e dispositivos Bluetooth")]
 [assembly: AssemblyProduct("Mouse Battery Redragon")]
-[assembly: AssemblyCopyright("MIT · github.com/PauloHCbelaine/redragon-mouse-battery")]
-[assembly: AssemblyVersion("1.5.0.0")]
-[assembly: AssemblyFileVersion("1.5.0.0")]
+[assembly: AssemblyCopyright("MIT Â· github.com/PauloHCbelaine/redragon-mouse-battery")]
+[assembly: AssemblyVersion("1.6.0.0")]
+[assembly: AssemblyFileVersion("1.6.0.0")]
 
 static class Hid
 {
@@ -40,7 +40,7 @@ static class Hid
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr sec, uint disp, uint flags, IntPtr tmpl);
 
-    // Todos os caminhos HID cujo nome contém todas as partes pedidas (ex.: "vid_3554", "col05").
+    // Todos os caminhos HID cujo nome contÃ©m todas as partes pedidas (ex.: "vid_3554", "col05").
     public static List<string> FindPaths(params string[] parts)
     {
         var result = new List<string>();
@@ -77,12 +77,44 @@ static class Hid
     {
         return CreateFile(path, 0xC0000000, 3, IntPtr.Zero, 3, 0x40000000, IntPtr.Zero); // RW, share RW, OPEN_EXISTING, OVERLAPPED
     }
+
+    // Tamanhos dos relatÃ³rios e o "tipo" (usage) de uma coleÃ§Ã£o HID. SÃ³ lÃª; nÃ£o fala com o aparelho.
+    public class Caps { public int UsagePage, Usage, InLen, OutLen, FeatLen; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct HIDP_CAPS
+    {
+        public ushort Usage, UsagePage, InLen, OutLen, FeatLen;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 17)] public ushort[] r;
+        public ushort n1, n2, n3, n4, n5, n6, n7, n8, n9, n10;
+    }
+    [DllImport("hid.dll")] static extern bool HidD_GetPreparsedData(SafeFileHandle h, out IntPtr p);
+    [DllImport("hid.dll")] static extern bool HidD_FreePreparsedData(IntPtr p);
+    [DllImport("hid.dll")] static extern int HidP_GetCaps(IntPtr p, out HIDP_CAPS c);
+
+    public static Caps GetCaps(string path)
+    {
+        // Acesso 0: consulta sem abrir para leitura/escrita (funciona atÃ© em teclado e mouse do sistema).
+        using (var h = CreateFile(path, 0, 3, IntPtr.Zero, 3, 0, IntPtr.Zero))
+        {
+            if (h.IsInvalid) return null;
+            IntPtr pp;
+            if (!HidD_GetPreparsedData(h, out pp)) return null;
+            try
+            {
+                HIDP_CAPS c;
+                if (HidP_GetCaps(pp, out c) != 0x110000) return null;
+                return new Caps { UsagePage = c.UsagePage, Usage = c.Usage, InLen = c.InLen, OutLen = c.OutLen, FeatLen = c.FeatLen };
+            }
+            finally { HidD_FreePreparsedData(pp); }
+        }
+    }
 }
 
 // ======================= Mouse Redragon (Compx) =======================
 
-// O driver oficial da Redragon pode estar usando o mesmo canal ao mesmo tempo, então
-// respostas podem se perder: cada pedido é repetido algumas vezes.
+// O driver oficial da Redragon pode estar usando o mesmo canal ao mesmo tempo, entÃ£o
+// respostas podem se perder: cada pedido Ã© repetido algumas vezes.
 class Mouse : IDisposable
 {
     FileStream fs;
@@ -92,7 +124,7 @@ class Mouse : IDisposable
     // Um pedido por vez para o mouse, mesmo vindo de lugares diferentes do app.
     static readonly object Busy = new object();
 
-    // cmd 0x04 = bateria; 0x08 = ler `len` bytes da memória em `addr`; 0x07 = gravar `data` em `addr`.
+    // cmd 0x04 = bateria; 0x08 = ler `len` bytes da memÃ³ria em `addr`; 0x07 = gravar `data` em `addr`.
     public byte[] Query(byte cmd, int addr, int len, byte[] data = null)
     {
         var req = new byte[17];
@@ -146,10 +178,10 @@ class Mouse : IDisposable
         return true;
     }
 
-    // Valor simples gravado em par com o byte de verificação (0x55 - valor).
+    // Valor simples gravado em par com o byte de verificaÃ§Ã£o (0x55 - valor).
     public static byte[] Pair(int v) { return new[] { (byte)v, (byte)((0x55 - v) & 0xFF) }; }
 
-    // Abre o mouse (dongle primeiro) e executa `work`. Devolve null se o mouse não responder.
+    // Abre o mouse (dongle primeiro) e executa `work`. Devolve null se o mouse nÃ£o responder.
     public static T With<T>(Func<Mouse, T> work) where T : class
     {
         var paths = Hid.FindPaths("vid_3554", "mi_01", "col05");
@@ -163,7 +195,7 @@ class Mouse : IDisposable
                     if (h.IsInvalid) continue;
                     using (var m = new Mouse(h))
                     {
-                        if (m.Query(0x04, 0, 0) == null) continue; // não está respondendo por este caminho
+                        if (m.Query(0x04, 0, 0) == null) continue; // nÃ£o estÃ¡ respondendo por este caminho
                         T result = work(m);
                         if (result != null) return result;
                     }
@@ -179,6 +211,9 @@ class Mouse : IDisposable
         var paths = Hid.FindPaths("vid_3554", "mi_01", "col05");
         // Dongle (2.4G) primeiro, cabo depois.
         paths.Sort((a, b) => (b.Contains("pid_f5d5") ? 1 : 0) - (a.Contains("pid_f5d5") ? 1 : 0));
+        var none = new MouseReading();
+        none.Present = paths.Count > 0;
+        if (none.Present) none.Name = ModelName(paths[0]);
         foreach (string p in paths)
         {
             try
@@ -191,11 +226,12 @@ class Mouse : IDisposable
                         byte[] b = m.Query(0x04, 0, 0);
                         if (b == null || b[6] == 0 || b[6] > 100) continue;
                         var r = new MouseReading();
+                        r.Present = true; r.Name = none.Name;
                         r.Ok = true; r.Percent = b[6]; r.Charging = b[7] != 0;
                         r.MilliVolts = (b[8] << 8) | b[9];
                         r.Wired = !p.Contains("pid_f5d5");
 
-                        // Memória 0x0000: [polling, chk, nº de níveis de DPI, chk, nível ativo (0..), chk]
+                        // MemÃ³ria 0x0000: [polling, chk, nÂº de nÃ­veis de DPI, chk, nÃ­vel ativo (0..), chk]
                         byte[] c = m.Query(0x08, 0x0000, 6);
                         if (c != null)
                         {
@@ -208,7 +244,14 @@ class Mouse : IDisposable
             }
             catch { }
         }
-        return new MouseReading();
+        return none;
+    }
+
+    // O chip Compx Ã© usado por vÃ¡rias marcas; os IDs do M916 PRO vÃªm do Config.ini do driver da Redragon.
+    static string ModelName(string path)
+    {
+        if (path.Contains("pid_f5d5") || path.Contains("pid_f55e") || path.Contains("pid_f55f")) return "Redragon M916 PRO";
+        return "Mouse (chip Compx)";
     }
 
     static int PollingHz(byte v)
@@ -221,8 +264,8 @@ class Mouse : IDisposable
     }
 }
 
-// Configurações do mouse. Endereços confirmados no M916 PRO 1K comparando a memória
-// antes/depois de mudar cada opção no driver oficial da Redragon.
+// ConfiguraÃ§Ãµes do mouse. EndereÃ§os confirmados no M916 PRO 1K comparando a memÃ³ria
+// antes/depois de mudar cada opÃ§Ã£o no driver oficial da Redragon.
 class MouseSettings
 {
     public const int MaxLevels = 8;
@@ -237,7 +280,7 @@ class MouseSettings
     static int PollCode(int hz) { return hz == 125 ? 0x08 : hz == 250 ? 0x04 : hz == 500 ? 0x02 : 0x01; }
     static int PollHz(int code) { return code == 0x08 ? 125 : code == 0x04 ? 250 : code == 0x02 ? 500 : 1000; }
 
-    // DPI = (código + 1) × 50. Os 2 bits altos do código vão no 3º byte (bits 2-3 do X e do Y).
+    // DPI = (cÃ³digo + 1) Ã— 50. Os 2 bits altos do cÃ³digo vÃ£o no 3Âº byte (bits 2-3 do X e do Y).
     static int DecodeDpi(byte lo, byte nib) { return ((((nib >> 2) & 3) << 8 | lo) + 1) * 50; }
     static byte[] EncodeDpi(int dpi, byte oldNib)
     {
@@ -266,15 +309,15 @@ class MouseSettings
         return s;
     }
 
-    // Grava só o que mudou em relação a `old`. Devolve o que falhou ("" = tudo certo).
+    // Grava sÃ³ o que mudou em relaÃ§Ã£o a `old`. Devolve o que falhou ("" = tudo certo).
     public string Apply(Mouse m, MouseSettings old)
     {
         var errors = new List<string>();
         for (int i = 0; i < MaxLevels; i++)
             if (i < Levels && Dpi[i] != old.Dpi[i] && !m.WriteMem(0x000C + 4 * i, EncodeDpi(Dpi[i], old.dpiRaw[4 * i + 2])))
                 errors.Add("DPI " + (i + 1));
-        if (Levels != old.Levels && !m.WriteMem(0x0002, Mouse.Pair(Levels))) errors.Add("quantidade de níveis");
-        if (Active != old.Active && !m.WriteMem(0x0004, Mouse.Pair(Active - 1))) errors.Add("nível ativo");
+        if (Levels != old.Levels && !m.WriteMem(0x0002, Mouse.Pair(Levels))) errors.Add("quantidade de nÃ­veis");
+        if (Active != old.Active && !m.WriteMem(0x0004, Mouse.Pair(Active - 1))) errors.Add("nÃ­vel ativo");
         if (Polling != old.Polling && !m.WriteMem(0x0000, Mouse.Pair(PollCode(Polling)))) errors.Add("polling");
         if (LodMm != old.LodMm && !m.WriteMem(0x000A, Mouse.Pair(LodMm))) errors.Add("LOD");
         if (PeakSeconds != old.PeakSeconds && !m.WriteMem(0x00B7, Mouse.Pair(PeakSeconds / 10))) errors.Add("Peak Performance");
@@ -283,14 +326,14 @@ class MouseSettings
 
     public MouseSettings Copy() { var c = (MouseSettings)MemberwiseClone(); c.Dpi = (int[])Dpi.Clone(); c.dpiRaw = (byte[])dpiRaw.Clone(); return c; }
 
-    // Perfil salvo como texto: polling|níveis|ativo|lod|peak|dpi1,dpi2,...
+    // Perfil salvo como texto: polling|nÃ­veis|ativo|lod|peak|dpi1,dpi2,...
     public string Serialize()
     {
         var d = new string[Levels]; for (int i = 0; i < Levels; i++) d[i] = Dpi[i].ToString();
         return Polling + "|" + Levels + "|" + Active + "|" + LodMm + "|" + PeakSeconds + "|" + string.Join(",", d);
     }
 
-    // Aplica um perfil por cima das configurações atuais (mantém os bytes que o perfil não guarda).
+    // Aplica um perfil por cima das configuraÃ§Ãµes atuais (mantÃ©m os bytes que o perfil nÃ£o guarda).
     public MouseSettings WithProfile(string text)
     {
         if (string.IsNullOrEmpty(text)) return null;
@@ -310,8 +353,9 @@ class MouseSettings
 
 class MouseReading
 {
-    // Percent é o que o mouse informa. Enquanto carrega, a voltagem sobe e esse valor fica
-    // inflado, então o app não o mostra como nível real nesse período.
+    // Percent Ã© o que o mouse informa. Enquanto carrega, a voltagem sobe e esse valor fica
+    // inflado, entÃ£o o app nÃ£o o mostra como nÃ­vel real nesse perÃ­odo.
+    public bool Present; public string Name = "Redragon M916 PRO";
     public bool Ok; public int Percent; public bool Charging; public int MilliVolts; public bool Wired;
     public int PollingHz;
     public int DpiLevel, DpiLevels;
@@ -320,21 +364,10 @@ class MouseReading
 
 // ======================= Teclado Anne Pro 2 (cabo USB) =======================
 
-// Cor única para todas as teclas, com o comando que o Annemone descobriu no ObinsKit
-// (github.com/illixion/Annemone). Só funciona com o teclado no cabo USB (interface 1).
+// Cor Ãºnica para todas as teclas, com o comando que o Annemone descobriu no ObinsKit
+// (github.com/illixion/Annemone). SÃ³ funciona com o teclado no cabo USB (interface 1).
 static class Keyboard
 {
-    [StructLayout(LayoutKind.Sequential)]
-    struct CAPS
-    {
-        public ushort Usage, UsagePage, InLen, OutLen, FeatLen;
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 17)] public ushort[] r;
-        public ushort n1, n2, n3, n4, n5, n6, n7, n8, n9, n10;
-    }
-    [DllImport("hid.dll")] static extern bool HidD_GetPreparsedData(SafeFileHandle h, out IntPtr p);
-    [DllImport("hid.dll")] static extern bool HidD_FreePreparsedData(IntPtr p);
-    [DllImport("hid.dll")] static extern int HidP_GetCaps(IntPtr p, out CAPS c);
-
     static readonly string[] Pids = { "pid_8008", "pid_8009", "pid_a292", "pid_a293" };
 
     static string FindPath()
@@ -351,16 +384,11 @@ static class Keyboard
         string path = FindPath();
         if (path == null) return false;
         byte[] msg = { 0, 123, 16, 65, 16, 7, 0, 0, 125, 32, 3, 255, 1, c.R, c.G, c.B };
+        Hid.Caps caps = Hid.GetCaps(path);
+        int len = caps != null && caps.OutLen > 0 ? caps.OutLen : 65;
         using (var h = Hid.Open(path))
         {
             if (h.IsInvalid) return false;
-            int len = 65;
-            IntPtr pp;
-            if (HidD_GetPreparsedData(h, out pp))
-            {
-                CAPS caps; if (HidP_GetCaps(pp, out caps) == 0x110000 && caps.OutLen > 0) len = caps.OutLen;
-                HidD_FreePreparsedData(pp);
-            }
             var buf = new byte[Math.Max(len, msg.Length)];
             Array.Copy(msg, buf, msg.Length);
             using (var fs = new FileStream(h, FileAccess.ReadWrite, buf.Length, true)) fs.Write(buf, 0, buf.Length);
@@ -369,7 +397,7 @@ static class Keyboard
     }
 }
 
-// Perfis guardados no registro do usuário.
+// Perfis guardados no registro do usuÃ¡rio.
 static class Profiles
 {
     const string Key = @"Software\MouseBatteryRedragon\Profiles";
@@ -389,8 +417,8 @@ static class Profiles
 
 // ======================= Dispositivos Bluetooth =======================
 
-// O Windows guarda a bateria dos dispositivos Bluetooth LE (teclados, controles, fones…) como
-// propriedades do próprio dispositivo. Basta ler, sem falar com o aparelho.
+// O Windows guarda a bateria dos dispositivos Bluetooth LE (teclados, controles, fonesâ€¦) como
+// propriedades do prÃ³prio dispositivo. Basta ler, sem falar com o aparelho.
 class BtDevice
 {
     public string Id, Name, Category; public int Percent; public bool Charging; public DateTime Updated;
@@ -488,11 +516,11 @@ class App : ApplicationContext
 
     MouseReading mouse;
     bool mouseOnline;
-    int mouseRealPct = -1; DateTime mouseRealTime; // último nível real (sem cabo)
+    int mouseRealPct = -1; DateTime mouseRealTime; // Ãºltimo nÃ­vel real (sem cabo)
     bool warned20, warned10, notifiedFull;
     DateTime dischargeStart; int dischargeStartPct = -1;
 
-    // Bluetooth: um ícone por dispositivo escolhido.
+    // Bluetooth: um Ã­cone por dispositivo escolhido.
     ContextMenuStrip menu = new ContextMenuStrip();
     ToolStripMenuItem btMenu = new ToolStripMenuItem("Dispositivos Bluetooth");
     ToolStripMenuItem profilesMenu = new ToolStripMenuItem("Perfis do mouse");
@@ -501,7 +529,7 @@ class App : ApplicationContext
     Dictionary<string, NotifyIcon> btTrays = new Dictionary<string, NotifyIcon>();
     List<BtDevice> bt = new List<BtDevice>();
     HashSet<string> btWarned = new HashSet<string>();
-    HashSet<string> btShown, btHidden; // escolhas do usuário; sem escolha = mostra se atualizou nos últimos 3 dias
+    HashSet<string> btShown, btHidden; // escolhas do usuÃ¡rio; sem escolha = mostra se atualizou nos Ãºltimos 3 dias
 
     App()
     {
@@ -518,7 +546,9 @@ class App : ApplicationContext
         btMenu.DropDownOpening += delegate { BuildBtMenu(); };
         menu.Items.Add(btMenu);
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Configurar mouse…", null, delegate { OpenSettings(); });
+        var configItem = menu.Items.Add("Configurar mouse (Compx)â€¦", null, delegate { OpenSettings(); });
+        // A ediÃ§Ã£o sÃ³ existe para os mouses com chip Compx (Redragon e parecidos).
+        menu.Opening += delegate { configItem.Enabled = profilesMenu.Enabled = compxPresent || mouseOnline; };
         profilesMenu.DropDownItems.Add("(nenhum)");
         profilesMenu.DropDownOpening += delegate { BuildProfilesMenu(); };
         menu.Items.Add(profilesMenu);
@@ -540,7 +570,8 @@ class App : ApplicationContext
         startupItem = new ToolStripMenuItem("Iniciar com o Windows", null, delegate { ToggleStartup(); });
         startupItem.Checked = IsStartupEnabled();
         menu.Items.Add(startupItem);
-        menu.Items.Add("Verificar atualizações (v" + VersionText + ")", null, delegate { CheckUpdates(); });
+        menu.Items.Add("Verificar atualizaÃ§Ãµes (v" + VersionText + ")", null, delegate { CheckUpdates(); });
+        menu.Items.Add("Gerar diagnÃ³stico", null, delegate { MakeDiagnostics(); });
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Sair", null, delegate
         {
@@ -555,7 +586,7 @@ class App : ApplicationContext
         ListenForSecondLaunch();
 
         Attach(mouseTray);
-        SetIcon(mouseTray, Icons.Mouse("…", Color.Gray, false), "Mouse: lendo…");
+        SetIcon(mouseTray, Icons.Mouse("â€¦", Color.Gray, false), "Mouse: lendoâ€¦");
         mouseTray.Visible = true;
 
         timer.Tick += delegate { RefreshMouse(); RefreshBt(); };
@@ -571,7 +602,7 @@ class App : ApplicationContext
         try { ui.BeginInvoke((Action)delegate { Theme.Load(); menu.Invalidate(); }); } catch { }
     }
 
-    // Abrir o .exe de novo com o app já rodando: a segunda cópia avisa esta, que abre o painel.
+    // Abrir o .exe de novo com o app jÃ¡ rodando: a segunda cÃ³pia avisa esta, que abre o painel.
     void ListenForSecondLaunch()
     {
         EventWaitHandle ev;
@@ -599,7 +630,7 @@ class App : ApplicationContext
         catch { }
     }
 
-    // Compara com a última versão publicada no GitHub (só quando o usuário pede).
+    // Compara com a Ãºltima versÃ£o publicada no GitHub (sÃ³ quando o usuÃ¡rio pede).
     void CheckUpdates()
     {
         InBackground(ui, () =>
@@ -618,17 +649,113 @@ class App : ApplicationContext
             Version latest;
             if (!tag.Success || !Version.TryParse(tag.Groups[1].Value, out latest))
             {
-                mouseTray.ShowBalloonTip(4000, "Atualizações", "Não consegui verificar agora. Confira a internet e tente de novo.", ToolTipIcon.Warning);
+                Notify(4000, "AtualizaÃ§Ãµes", "NÃ£o consegui verificar agora. Confira a internet e tente de novo.", ToolTipIcon.Warning);
                 return;
             }
             if (latest > new Version(AppVersion.Major, AppVersion.Minor, AppVersion.Build))
             {
-                if (MessageBox.Show("A versão " + latest + " está disponível (você usa a " + VersionText + ").\n\nAbrir a página de download?",
-                        "Atualização disponível", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes && url.Success)
+                if (MessageBox.Show("A versÃ£o " + latest + " estÃ¡ disponÃ­vel (vocÃª usa a " + VersionText + ").\n\nAbrir a pÃ¡gina de download?",
+                        "AtualizaÃ§Ã£o disponÃ­vel", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes && url.Success)
                     try { Process.Start(url.Groups[1].Value); } catch { }
             }
-            else mouseTray.ShowBalloonTip(3000, "Atualizações", "Você já está na versão mais recente (" + VersionText + ").", ToolTipIcon.Info);
+            else Notify(3000, "AtualizaÃ§Ãµes", "VocÃª jÃ¡ estÃ¡ na versÃ£o mais recente (" + VersionText + ").", ToolTipIcon.Info);
         });
+    }
+
+    // Arquivo de diagnÃ³stico para quando um mouse nÃ£o Ã© reconhecido: o que o app achou, as respostas
+    // brutas e a lista de dispositivos HID (sÃ³ IDs e tamanhos; nada pessoal). SÃ³ leitura.
+    public static string BuildDiagnostics()
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("Mouse Battery Redragon v" + VersionText + " â€” diagnÃ³stico");
+        sb.AppendLine(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " Â· " + Environment.OSVersion);
+        sb.AppendLine();
+
+        sb.AppendLine("== Mouse Compx (Redragon e outros, VID 3554) ==");
+        var r = Mouse.Read();
+        sb.AppendLine(r.Ok ? "Bateria " + r.Percent + "% carregando=" + r.Charging + " " + r.MilliVolts + " mV cabo=" + r.Wired + " polling=" + r.PollingHz
+                          : (r.Present ? "Encontrado, mas nÃ£o respondeu" : "NÃ£o encontrado"));
+        sb.AppendLine();
+
+        sb.AppendLine("== AJAZZ famÃ­lia Telink (VID 248A/249A) ==");
+        var log = new List<string>();
+        var a = Ajazz.Read(log);
+        foreach (string l in log) sb.AppendLine(l);
+        sb.AppendLine(a.Ok ? "Resultado: " + a.Percent + "% carregando=" + a.Charging + " cabo=" + a.Wired : "Resultado: sem leitura");
+        sb.AppendLine();
+
+        sb.AppendLine("== Bluetooth (bateria guardada pelo Windows) ==");
+        try { foreach (var d in Bluetooth.List()) sb.AppendLine(d.Name + ": " + d.Percent + "% atualizado " + d.Updated.ToString("yyyy-MM-dd HH:mm") + " categoria=" + d.Category); }
+        catch (Exception e) { sb.AppendLine("erro: " + e.Message); }
+        sb.AppendLine();
+
+        sb.AppendLine("== Todos os dispositivos HID (caminho Â· page:usage Â· tamanhos in/out/feature) ==");
+        var all = Hid.FindPaths();
+        all.Sort(StringComparer.Ordinal);
+        foreach (string p in all)
+        {
+            Hid.Caps c = Hid.GetCaps(p);
+            sb.AppendLine(p + (c == null ? "  (sem acesso)" :
+                string.Format("  Â· {0:X4}:{1:X4} Â· {2}/{3}/{4}", c.UsagePage, c.Usage, c.InLen, c.OutLen, c.FeatLen)));
+        }
+        return sb.ToString();
+    }
+
+    static string Zeros(int n) { var z = new string[n]; for (int i = 0; i < n; i++) z[i] = "00"; return string.Join(" ", z); }
+
+    // Confere o leitor do AJAZZ com respostas reais capturadas no AJ179 V2 MAX (HaloBattery #246).
+    static string SelfTest()
+    {
+        Func<string, byte[]> hex = s => Array.ConvertAll(s.Split(' '), x => Convert.ToByte(x, 16));
+        string pad = Zeros(15);
+        var cases = new[]
+        {
+            // info, 75 %, fora do cabo (byte 14 = 01), checksum 49
+            new { Name = "info 75%", Frame = "00 10 00 01 0b 4e 36 32 35 00 00 11 01 00 4b 01 00 " + pad + " 49", Want = "info 75 False" },
+            // mesmo quadro sem o report id na frente
+            new { Name = "info sem report id", Frame = "10 00 01 0b 4e 36 32 35 00 00 11 01 00 4b 01 00 " + pad + " 49", Want = "info 75 False" },
+            // carregando (byte 14 = 00); checksum muda de 49 para 48
+            new { Name = "info carregando", Frame = "00 10 00 01 0b 4e 36 32 35 00 00 11 01 00 4b 00 00 " + pad + " 48", Want = "info 75 True" },
+            // checksum errado: deve recusar
+            new { Name = "checksum errado", Frame = "00 10 00 01 0b 4e 36 32 35 00 00 11 01 00 4b 01 00 " + pad + " 50", Want = "recusado" },
+            // aviso espontÃ¢neo do dongle
+            new { Name = "aviso c0 01 4a", Frame = "00 c0 01 4a " + Zeros(29), Want = "aviso 74 " },
+            // aviso de link caÃ­do: deve recusar
+            new { Name = "aviso c0 00", Frame = "00 c0 00 4a " + Zeros(29), Want = "recusado" },
+        };
+        var sb = new StringBuilder();
+        int ok = 0;
+        foreach (var c in cases)
+        {
+            byte[] f = hex(c.Frame);
+            string kind; int lvl; bool? ch;
+            string got = Ajazz.Parse(f, f.Length, out kind, out lvl, out ch) ? kind + " " + lvl + " " + ch : "recusado";
+            bool pass = got == c.Want;
+            if (pass) ok++;
+            sb.AppendLine((pass ? "OK    " : "FALHOU") + "  " + c.Name + "  -> " + got + (pass ? "" : "  (esperado: " + c.Want + ")"));
+        }
+        sb.AppendLine(ok + "/" + cases.Length + " passaram");
+        return sb.ToString();
+    }
+
+    void MakeDiagnostics()
+    {
+        Notify(3000, "DiagnÃ³stico", "Gerando o arquivoâ€¦ mexa no mouse para ele estar acordado.", ToolTipIcon.Info);
+        InBackground(ui, () => BuildDiagnostics(), text =>
+        {
+            if (text == null) { Notify(4000, "DiagnÃ³stico", "NÃ£o consegui gerar o arquivo.", ToolTipIcon.Warning); return; }
+            string file = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "MouseBattery-diagnostico.txt");
+            try { File.WriteAllText(file, text, Encoding.UTF8); Process.Start(file); }
+            catch (Exception e) { LogError(e); Notify(4000, "DiagnÃ³stico", "NÃ£o consegui salvar na Ãrea de Trabalho.", ToolTipIcon.Warning); }
+        });
+    }
+
+    // Aviso geral do app: sai pelo primeiro Ã­cone visÃ­vel na bandeja.
+    void Notify(int ms, string title, string text, ToolTipIcon icon)
+    {
+        NotifyIcon t = mouseTray.Visible ? mouseTray : ajazzTray.Visible ? ajazzTray : null;
+        if (t == null) foreach (var b in btTrays.Values) if (b.Visible) { t = b; break; }
+        (t ?? mouseTray).ShowBalloonTip(ms, title, text, icon);
     }
 
     void Attach(NotifyIcon t)
@@ -637,9 +764,9 @@ class App : ApplicationContext
         t.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowDetails(); };
     }
 
-    // ---------- edição do mouse ----------
+    // ---------- ediÃ§Ã£o do mouse ----------
 
-    // Lê o estado atual do mouse e grava só as diferenças. null = mouse não respondeu.
+    // LÃª o estado atual do mouse e grava sÃ³ as diferenÃ§as. null = mouse nÃ£o respondeu.
     public static string ApplySettings(MouseSettings ignored, MouseSettings wanted)
     {
         return Mouse.With(m =>
@@ -673,7 +800,7 @@ class App : ApplicationContext
             openingSettings = false;
             if (s == null)
             {
-                mouseTray.ShowBalloonTip(5000, "Configurar mouse", "O mouse não respondeu. Mexa nele para acordar e tente de novo.", ToolTipIcon.Warning);
+                Notify(5000, "Configurar mouse", "O mouse nÃ£o respondeu. Mexa nele para acordar e tente de novo.", ToolTipIcon.Warning);
                 return;
             }
             settingsForm = new SettingsWindow(s);
@@ -704,12 +831,12 @@ class App : ApplicationContext
             var now = MouseSettings.Read(m);
             if (now == null) return null;
             var wanted = now.WithProfile(data);
-            return wanted == null ? "o perfil salvo está inválido" : wanted.Apply(m, now);
+            return wanted == null ? "o perfil salvo estÃ¡ invÃ¡lido" : wanted.Apply(m, now);
         }), err =>
         {
-            if (err == null) mouseTray.ShowBalloonTip(5000, "Perfil não aplicado", "O mouse não respondeu. Mexa nele para acordar e tente de novo.", ToolTipIcon.Warning);
-            else if (err.Length > 0) mouseTray.ShowBalloonTip(5000, "Perfil \"" + name + "\" com problema", "Não gravou: " + err, ToolTipIcon.Warning);
-            else mouseTray.ShowBalloonTip(3000, "Perfil \"" + name + "\" aplicado", "Configurações gravadas no mouse.", ToolTipIcon.Info);
+            if (err == null) Notify(5000, "Perfil nÃ£o aplicado", "O mouse nÃ£o respondeu. Mexa nele para acordar e tente de novo.", ToolTipIcon.Warning);
+            else if (err.Length > 0) Notify(5000, "Perfil \"" + name + "\" com problema", "NÃ£o gravou: " + err, ToolTipIcon.Warning);
+            else Notify(3000, "Perfil \"" + name + "\" aplicado", "ConfiguraÃ§Ãµes gravadas no mouse.", ToolTipIcon.Info);
             RefreshMouse();
         });
     }
@@ -735,7 +862,7 @@ class App : ApplicationContext
             keyboardMenu.DropDownItems.Add(it);
         }
         keyboardMenu.DropDownItems.Add(new ToolStripSeparator());
-        keyboardMenu.DropDownItems.Add("Outra cor…", null, delegate
+        keyboardMenu.DropDownItems.Add("Outra corâ€¦", null, delegate
         {
             using (var dlg = new ColorDialog { FullOpen = true })
                 if (dlg.ShowDialog() == DialogResult.OK) SetKeyboardColor(dlg.Color);
@@ -753,7 +880,7 @@ class App : ApplicationContext
     {
         bool ok = false;
         try { ok = Keyboard.SetColor(c); } catch { }
-        if (!ok) mouseTray.ShowBalloonTip(4000, "Teclado", "Não consegui falar com o teclado. Ele está no cabo USB?", ToolTipIcon.Warning);
+        if (!ok) Notify(4000, "Teclado", "NÃ£o consegui falar com o teclado. Ele estÃ¡ no cabo USB?", ToolTipIcon.Warning);
     }
 
     // ---------- Bluetooth ----------
@@ -779,6 +906,7 @@ class App : ApplicationContext
         }
         foreach (var id in new List<string>(btTrays.Keys))
             if (!seen.Contains(id)) { btTrays[id].Visible = false; btTrays[id].Dispose(); btTrays.Remove(id); }
+        UpdateTrayVisibility();
         UpdateFlyout();
     }
 
@@ -796,7 +924,7 @@ class App : ApplicationContext
         foreach (var d in bt)
         {
             var dev = d;
-            var it = new ToolStripMenuItem(d.Name + " — " + (d.Charging ? "carregando" : d.Percent + "%") + " (" + When(d.Updated) + ")");
+            var it = new ToolStripMenuItem(d.Name + " â€” " + (d.Charging ? "carregando" : d.Percent + "%") + " (" + When(d.Updated) + ")");
             it.Checked = IsShown(d);
             it.Click += delegate
             {
@@ -827,8 +955,10 @@ class App : ApplicationContext
         busy = true;
         ThreadPool.QueueUserWorkItem(delegate
         {
-            MouseReading r = Mouse.Read();
-            try { ui.BeginInvoke((Action)delegate { OnMouse(r); busy = false; }); }
+            MouseReading r = null; AjazzReading a = null;
+            try { r = Mouse.Read(); } catch (Exception e) { LogError(e); r = new MouseReading(); }
+            try { a = Ajazz.Read(); } catch (Exception e) { LogError(e); a = new AjazzReading(); }
+            try { ui.BeginInvoke((Action)delegate { OnMouse(r); OnAjazz(a); UpdateTrayVisibility(); UpdateFlyout(); busy = false; }); }
             catch { busy = false; }
         });
     }
@@ -836,18 +966,75 @@ class App : ApplicationContext
     void OnMouse(MouseReading r)
     {
         mouseOnline = r.Ok;
-        try { Update(r); } finally { UpdateFlyout(); }
+        compxPresent = r.Present;
+        if (r.Present) mouseName = r.Name;
+        Update(r);
+    }
+
+    bool compxPresent;
+    string mouseName = "Redragon M916 PRO";
+
+    // O Ã­cone do Redragon aparece se ele estiver conectado. Se nenhum outro dispositivo tiver Ã­cone,
+    // ele fica como Ã­cone do app (com "?"), para o menu continuar acessÃ­vel.
+    void UpdateTrayVisibility()
+    {
+        bool others = ajazzTray.Visible;
+        foreach (var t in btTrays.Values) others |= t.Visible;
+        mouseTray.Visible = compxPresent || mouseOnline || !others;
+        if (!compxPresent && !mouseOnline && !others)
+            SetIcon(mouseTray, Icons.Mouse("?", Color.Gray, false), "Nenhum mouse compatÃ­vel encontrado");
+    }
+
+    // ---------- AJAZZ ----------
+
+    NotifyIcon ajazzTray = new NotifyIcon();
+    AjazzReading ajazz;
+    int ajazzLastPct = -1; DateTime ajazzLastTime;
+    bool ajWarned20, ajWarned10;
+
+    void OnAjazz(AjazzReading a)
+    {
+        ajazz = a;
+        if (!a.Present) { ajazzTray.Visible = false; return; }
+        if (ajazzTray.ContextMenuStrip == null) Attach(ajazzTray);
+        string when = DateTime.Now.ToString("HH:mm:ss");
+        if (a.Ok)
+        {
+            ajazzLastPct = a.Percent; ajazzLastTime = a.Time;
+            Color c = a.Charging ? Color.DeepSkyBlue : a.Percent <= 15 ? Color.Red : a.Percent <= 30 ? Color.Orange : Color.LimeGreen;
+            SetIcon(ajazzTray, Icons.Mouse(a.Percent >= 100 ? "F" : a.Percent.ToString(), c, a.Charging),
+                "AJAZZ: " + a.Percent + "%" + (a.Charging ? " carregando" : "") + "\n" + (a.Wired ? "Cabo" : "Dongle 2.4G") + " Â· " + when);
+            if (a.Charging || a.Percent > 25) ajWarned20 = ajWarned10 = false;
+            else if (a.Percent <= 10 && !ajWarned10)
+            {
+                ajWarned10 = ajWarned20 = true;
+                ajazzTray.ShowBalloonTip(10000, "Bateria do AJAZZ crÃ­tica", "Restam " + a.Percent + "%. Coloque o mouse para carregar.", ToolTipIcon.Warning);
+            }
+            else if (a.Percent <= 20 && !ajWarned20)
+            {
+                ajWarned20 = true;
+                ajazzTray.ShowBalloonTip(8000, "Bateria do AJAZZ baixa", "Restam " + a.Percent + "%.", ToolTipIcon.Info);
+            }
+        }
+        else
+        {
+            // Sem resposta: mouse dormindo ou desligado. Mostra o Ãºltimo valor, em cinza.
+            string last = ajazzLastPct >= 0 ? ajazzLastPct.ToString() : "?";
+            SetIcon(ajazzTray, Icons.Mouse(last, Color.Gray, false), "AJAZZ dormindo ou desligado" +
+                (ajazzLastPct >= 0 ? " (Ãºltimo: " + ajazzLastPct + "%)" : ""));
+        }
+        ajazzTray.Visible = true;
     }
 
     void Update(MouseReading r)
     {
         if (!r.Ok)
         {
-            string old = mouseRealPct >= 0 ? " (último: " + mouseRealPct + "%)" : "";
+            string old = mouseRealPct >= 0 ? " (Ãºltimo: " + mouseRealPct + "%)" : "";
             SetIcon(mouseTray, Icons.Mouse("?", Color.Gray, false), "Mouse desligado/dormindo" + old);
             return;
         }
-        // Abriu o app com o mouse já carregado no cabo: não precisa avisar.
+        // Abriu o app com o mouse jÃ¡ carregado no cabo: nÃ£o precisa avisar.
         if (mouse == null && r.Charging && r.Percent >= 100) notifiedFull = true;
         mouse = r;
         string when = DateTime.Now.ToString("HH:mm:ss");
@@ -862,7 +1049,7 @@ class App : ApplicationContext
                 if (!notifiedFull)
                 {
                     notifiedFull = true;
-                    mouseTray.ShowBalloonTip(5000, "Mouse carregado", "A bateria chegou a 100%. Já pode tirar o cabo.", ToolTipIcon.Info);
+                    mouseTray.ShowBalloonTip(5000, "Mouse carregado", "A bateria chegou a 100%. JÃ¡ pode tirar o cabo.", ToolTipIcon.Info);
                 }
             }
             else
@@ -877,13 +1064,13 @@ class App : ApplicationContext
 
         Color c = r.Percent <= 15 ? Color.Red : r.Percent <= 30 ? Color.Orange : Color.LimeGreen;
         SetIcon(mouseTray, Icons.Mouse(r.Percent >= 100 ? "F" : r.Percent.ToString(), c, false),
-            "Mouse: " + r.Percent + "%\n" + (r.Wired ? "Cabo" : "Dongle 2.4G") + " · " + when);
+            "Mouse: " + r.Percent + "%\n" + (r.Wired ? "Cabo" : "Dongle 2.4G") + " Â· " + when);
 
         if (r.Percent > 25) { warned20 = warned10 = false; return; }
         if (r.Percent <= 10 && !warned10)
         {
             warned10 = warned20 = true;
-            mouseTray.ShowBalloonTip(10000, "Bateria do mouse crítica", "Restam " + r.Percent + "%. Coloque o mouse para carregar.", ToolTipIcon.Warning);
+            mouseTray.ShowBalloonTip(10000, "Bateria do mouse crÃ­tica", "Restam " + r.Percent + "%. Coloque o mouse para carregar.", ToolTipIcon.Warning);
         }
         else if (r.Percent <= 20 && !warned20)
         {
@@ -897,7 +1084,7 @@ class App : ApplicationContext
         if (dischargeStartPct < 0 || r.Percent > dischargeStartPct) { dischargeStart = r.Time; dischargeStartPct = r.Percent; }
     }
 
-    // Estimativa só depois de cair pelo menos 5 pontos, para não chutar.
+    // Estimativa sÃ³ depois de cair pelo menos 5 pontos, para nÃ£o chutar.
     string Remaining()
     {
         if (mouse == null || mouse.Charging || dischargeStartPct < 0) return null;
@@ -909,7 +1096,7 @@ class App : ApplicationContext
 
     // ---------- detalhes ----------
 
-    // Painel que abre ao clicar no ícone: um cartão por dispositivo.
+    // Painel que abre ao clicar no Ã­cone: um cartÃ£o por dispositivo.
     Flyout flyout;
     DateTime flyoutClosed;
 
@@ -934,18 +1121,18 @@ class App : ApplicationContext
     {
         if (flyout == null || flyout.IsDisposed) return;
         flyout.SetCards(BuildCards(), "Atualiza a cada " + (timer.Interval / 1000 < 60 ? timer.Interval / 1000 + " s" : timer.Interval / 60000 + " min") +
-            (mouse != null ? " · última leitura " + mouse.Time.ToString("HH:mm:ss") : ""));
+            (mouse != null ? " Â· Ãºltima leitura " + mouse.Time.ToString("HH:mm:ss") : ""));
     }
 
     List<DeviceCard> BuildCards()
     {
         var list = new List<DeviceCard>();
-        var m = new DeviceCard { Glyph = "", Name = "Redragon M916 PRO" };
+        var m = new DeviceCard { Glyph = "î¥¢", Name = mouseName };
         if (mouse == null || !mouseOnline)
         {
             m.Percent = mouseRealPct; m.Stale = true;
             m.Status = "Desligado ou dormindo";
-            m.Detail = mouseRealPct >= 0 ? "Último nível conhecido: " + mouseRealPct + "%" : "Mexa o mouse para ele acordar";
+            m.Detail = mouseRealPct >= 0 ? "Ãšltimo nÃ­vel conhecido: " + mouseRealPct + "%" : "Mexa o mouse para ele acordar";
         }
         else
         {
@@ -953,21 +1140,39 @@ class App : ApplicationContext
             if (mouse.Charging)
             {
                 m.Percent = mouse.Percent >= 100 ? 100 : mouseRealPct;
-                m.Status = mouse.Percent >= 100 ? "Carregado" : "Carregando" + (mouseRealPct >= 0 ? " · antes do cabo " + mouseRealPct + "%" : "");
+                m.Status = mouse.Percent >= 100 ? "Carregado" : "Carregando" + (mouseRealPct >= 0 ? " Â· antes do cabo " + mouseRealPct + "%" : "");
             }
             else
             {
                 m.Percent = mouse.Percent;
                 string rem = Remaining();
-                m.Status = rem == null ? "Em uso" : rem.StartsWith("~") ? rem + " restantes" : "Calculando o tempo restante…";
+                m.Status = rem == null ? "Em uso" : rem.StartsWith("~") ? rem + " restantes" : "Calculando o tempo restanteâ€¦";
             }
             var parts = new List<string> { mouse.Wired ? "Cabo USB" : "Dongle 2.4G" };
             if (mouse.PollingHz > 0) parts.Add(mouse.PollingHz + " Hz");
             if (mouse.DpiLevels > 0) parts.Add("DPI " + mouse.DpiLevel + "/" + mouse.DpiLevels);
             parts.Add((mouse.MilliVolts / 1000.0).ToString("0.00") + " V");
-            m.Detail = string.Join("  ·  ", parts.ToArray());
+            m.Detail = string.Join("  Â·  ", parts.ToArray());
         }
-        list.Add(m);
+        if (compxPresent || mouseOnline) list.Add(m);
+
+        if (ajazz != null && ajazz.Present)
+        {
+            var a = new DeviceCard { Glyph = "î¥¢", Name = "AJAZZ (AJ139 / AJ159 / AJ179)" };
+            if (ajazz.Ok)
+            {
+                a.Percent = ajazz.Percent; a.Charging = ajazz.Charging;
+                a.Status = ajazz.Charging ? "Carregando" : "Em uso";
+                a.Detail = (ajazz.Wired ? "Cabo USB" : "Dongle 2.4G") + "  Â·  leitura " + ajazz.Time.ToString("HH:mm:ss");
+            }
+            else
+            {
+                a.Percent = ajazzLastPct; a.Stale = true;
+                a.Status = "Dormindo ou desligado";
+                a.Detail = ajazzLastPct >= 0 ? "Ãšltimo nÃ­vel: " + ajazzLastPct + "% Ã s " + ajazzLastTime.ToString("HH:mm") : "Mexa o mouse para ele acordar";
+            }
+            list.Add(a);
+        }
 
         foreach (var d in bt)
         {
@@ -977,11 +1182,11 @@ class App : ApplicationContext
             {
                 Name = d.Name, Percent = d.Percent, Charging = d.Charging,
                 Stale = (DateTime.Now - d.Updated).TotalHours > 24,
-                Glyph = cat.Contains("keyboard") || d.Name == "AP2" ? "" :
-                        cat.Contains("gam") || cat.Contains("controller") || cat.Contains("8bitdo") ? "" :
-                        cat.Contains("audio") || cat.Contains("head") || cat.Contains("buds") ? "" : "",
+                Glyph = cat.Contains("keyboard") || d.Name == "AP2" ? "î¥" :
+                        cat.Contains("gam") || cat.Contains("controller") || cat.Contains("8bitdo") ? "îŸ¼" :
+                        cat.Contains("audio") || cat.Contains("head") || cat.Contains("buds") ? "îŸ¶" : "îœ‚",
             };
-            c.Status = d.Charging ? "Carregando" : c.Stale ? "Sem conexão recente" : "Bluetooth";
+            c.Status = d.Charging ? "Carregando" : c.Stale ? "Sem conexÃ£o recente" : "Bluetooth";
             c.Detail = "Atualizado " + When(d.Updated);
             list.Add(c);
         }
@@ -998,7 +1203,7 @@ class App : ApplicationContext
 
     [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr h);
 
-    // ---------- configurações ----------
+    // ---------- configuraÃ§Ãµes ----------
 
     void SetInterval(int sec)
     {
@@ -1066,19 +1271,19 @@ class App : ApplicationContext
         if (args.Length > 1 && args[0] == "--icons") { Icons.Preview(args[1]); return; }
         if (args.Length > 1 && args[0] == "--preview")
         {
-            // Desenha o painel e a janela de configuração em PNG, para conferir o visual.
+            // Desenha o painel e a janela de configuraÃ§Ã£o em PNG, para conferir o visual.
             var cards = new List<DeviceCard> {
-                new DeviceCard { Glyph = "", Name = "Redragon M916 PRO", Percent = 82, Status = "~31 horas restantes", Detail = "Dongle 2.4G  ·  1000 Hz  ·  DPI 3/5  ·  4.02 V" },
-                new DeviceCard { Glyph = "", Name = "AP2", Percent = 100, Status = "Bluetooth", Detail = "Atualizado hoje 13:53" },
-                new DeviceCard { Glyph = "", Name = "8BitDo Ultimate 2C Wireless", Percent = 6, Stale = true, Status = "Sem conexão recente", Detail = "Atualizado 14/10 00:06" },
-                new DeviceCard { Glyph = "", Name = "Mouse carregando (exemplo)", Percent = 65, Charging = true, Status = "Carregando · antes do cabo 65%", Detail = "Cabo USB  ·  1000 Hz" } };
+                new DeviceCard { Glyph = "î¥¢", Name = "Redragon M916 PRO", Percent = 82, Status = "~31 horas restantes", Detail = "Dongle 2.4G  Â·  1000 Hz  Â·  DPI 3/5  Â·  4.02 V" },
+                new DeviceCard { Glyph = "î¥", Name = "AP2", Percent = 100, Status = "Bluetooth", Detail = "Atualizado hoje 13:53" },
+                new DeviceCard { Glyph = "îŸ¼", Name = "8BitDo Ultimate 2C Wireless", Percent = 6, Stale = true, Status = "Sem conexÃ£o recente", Detail = "Atualizado 14/10 00:06" },
+                new DeviceCard { Glyph = "î¥¢", Name = "Mouse carregando (exemplo)", Percent = 65, Charging = true, Status = "Carregando Â· antes do cabo 65%", Detail = "Cabo USB  Â·  1000 Hz" } };
             Action<Form, string> snap = (f, name) =>
             {
                 f.StartPosition = FormStartPosition.Manual;
                 f.Show(); f.Location = new Point(-5000, 0); Application.DoEvents(); Thread.Sleep(300); Application.DoEvents();
                 using (var bmp = new Bitmap(f.Width, f.Height)) { f.DrawToBitmap(bmp, new Rectangle(0, 0, f.Width, f.Height)); bmp.Save(args[1] + name); }
             };
-            var fl = new Flyout(); fl.SetCards(cards, "Atualiza a cada 10 s · última leitura 17:58:02");
+            var fl = new Flyout(); fl.SetCards(cards, "Atualiza a cada 10 s Â· Ãºltima leitura 17:58:02");
             snap(fl, "-painel.png");
             var st = Mouse.With(m => MouseSettings.Read(m)) ?? new MouseSettings();
             snap(new SettingsWindow(st), "-config.png");
@@ -1092,12 +1297,14 @@ class App : ApplicationContext
             return;
         }
         if (args.Length > 1 && args[0] == "--make-icon") { Icons.WriteAppIcon(args[1]); return; }
+        if (args.Length > 1 && args[0] == "--diag") { File.WriteAllText(args[1], BuildDiagnostics(), Encoding.UTF8); return; }
+        if (args.Length > 1 && args[0] == "--selftest") { File.WriteAllText(args[1], SelfTest()); return; }
         bool isNew;
         using (new Mutex(true, AppName, out isNew))
         {
             if (!isNew)
             {
-                // Já está rodando: pede para a cópia aberta mostrar o painel.
+                // JÃ¡ estÃ¡ rodando: pede para a cÃ³pia aberta mostrar o painel.
                 try { using (var ev = EventWaitHandle.OpenExisting(ShowEventName)) ev.Set(); } catch { }
                 return;
             }
@@ -1111,17 +1318,17 @@ class App : ApplicationContext
     }
 }
 
-// ======================= Ícones =======================
+// ======================= Ãcones =======================
 
 static class Icons
 {
-    // Número da bateria; carregando = raio. Mouse: barra embaixo. Bluetooth: barra em cima.
+    // NÃºmero da bateria; carregando = raio. Mouse: barra embaixo. Bluetooth: barra em cima.
     public static Icon Mouse(string text, Color color, bool charging) { return Make(Draw(text, color, charging, false)); }
     public static Icon Bluetooth(string text, Color color, bool charging) { return Make(Draw(text, color, charging, true)); }
 
     static Icon Make(Bitmap bmp) { using (bmp) return Icon.FromHandle(bmp.GetHicon()); }
 
-    // Ícone do .exe: quadrado arredondado azul com um mouse e uma barra de bateria.
+    // Ãcone do .exe: quadrado arredondado azul com um mouse e uma barra de bateria.
     static Bitmap AppIcon(int s)
     {
         var bmp = new Bitmap(s, s);
@@ -1151,7 +1358,7 @@ static class Icons
         return bmp;
     }
 
-    // Grava um .ico com vários tamanhos (PNG dentro do ICO, aceito desde o Windows Vista).
+    // Grava um .ico com vÃ¡rios tamanhos (PNG dentro do ICO, aceito desde o Windows Vista).
     public static void WriteAppIcon(string file)
     {
         int[] sizes = { 16, 24, 32, 48, 64, 256 };
@@ -1188,7 +1395,7 @@ static class Icons
 
             if (charging)
             {
-                // Raio de carregando; se tiver o último valor, ele aparece pequeno ao lado.
+                // Raio de carregando; se tiver o Ãºltimo valor, ele aparece pequeno ao lado.
                 float x = text.Length > 0 ? 0 : 8;
                 g.FillPolygon(brush, new[] {
                     new PointF(x + 10, top), new PointF(x + 2, top + (bottom - top) * 0.58f), new PointF(x + 8, top + (bottom - top) * 0.58f),
@@ -1204,13 +1411,13 @@ static class Icons
                 float size = text.Length >= 3 ? 13 : text.Length == 2 ? 19 : 22;
                 using (var f = new Font("Segoe UI", size, FontStyle.Bold, GraphicsUnit.Pixel))
                 using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                    g.DrawString(text.Length > 0 ? text : "–", f, brush, new RectangleF(-2, top, 36, bottom - top), sf);
+                    g.DrawString(text.Length > 0 ? text : "â€“", f, brush, new RectangleF(-2, top, 36, bottom - top), sf);
             }
         }
         return bmp;
     }
 
-    // Gera um PNG com todos os estados dos ícones, para conferir o desenho.
+    // Gera um PNG com todos os estados dos Ã­cones, para conferir o desenho.
     public static void Preview(string file)
     {
         var states = new List<Bitmap> {
