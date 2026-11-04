@@ -449,6 +449,7 @@ class Flyout : Form
     const int W = 380, Pad = 14, CardH = 84, Gap = 8, HeaderH = 64, FooterH = 60;
 
     public event Action SettingsClicked, RefreshClicked, MoreClicked;
+    Screen screen = Screen.FromPoint(Cursor.Position);
 
     public Flyout()
     {
@@ -479,11 +480,16 @@ class Flyout : Form
     {
         cards = list; subtitle = sub;
         int h = HeaderH + Math.Max(1, cards.Count) * (CardH + Gap) + FooterH;
-        Rectangle wa = Screen.PrimaryScreen.WorkingArea;
-        SetBounds(wa.Right - W - 12, wa.Bottom - h - 12, W, h);
-        settings.SetBounds(Pad, h - FooterH + 14, 200, 32);
-        more.SetBounds(W - Pad - 36, h - FooterH + 14, 36, 32);
-        refresh.SetBounds(W - Pad - 36 - 8 - 36, h - FooterH + 14, 36, 32);
+        // Abre no monitor onde está o ícone, encostado no lado da barra de tarefas.
+        Rectangle wa = screen.WorkingArea, b = screen.Bounds;
+        int x = wa.Right - W - 12, y = wa.Bottom - h - 12;
+        if (wa.Top > b.Top) y = wa.Top + 12;        // barra em cima
+        else if (wa.Left > b.Left) x = wa.Left + 12; // barra à esquerda
+        SetBounds(x, Math.Max(wa.Top + 12, y), W, Math.Min(h, wa.Height - 24));
+        int fy = Height - FooterH + 14;
+        settings.SetBounds(Pad, fy, 200, 32);
+        more.SetBounds(W - Pad - 36, fy, 36, 32);
+        refresh.SetBounds(W - Pad - 36 - 8 - 36, fy, 36, 32);
         Invalidate();
     }
 
@@ -639,6 +645,11 @@ class SettingsWindow : Form
         Controls.Add(status);
         apply.SetBounds(W - Pad - 180, y, 180, 36);
         apply.Click += delegate { ApplyToMouse(Collect()); };
+        var reload = new FlatButton { Text = "Recarregar", Glyph = "" };
+        reload.SetBounds(W - Pad - 180 - 8 - 130, y, 130, 36);
+        reload.Click += delegate { ReloadFromMouse(); };
+        Controls.Add(reload);
+        status.Width = W - 2 * Pad - 180 - 8 - 130 - 8;
         Controls.Add(apply);
         y += 52;
 
@@ -702,21 +713,55 @@ class SettingsWindow : Form
     {
         if (profiles.Selected == null) { Status("Nenhum perfil salvo ainda.", true); return; }
         var s = current.WithProfile(Profiles.Get(profiles.Selected));
-        if (s == null) { Status("Perfil inválido.", true); return; }
-        if (ApplyToMouse(s)) Close();
+        if (s == null) { Status("Este perfil está inválido. Exclua e salve de novo.", true); return; }
+        ApplyToMouse(s, Close);
     }
 
-    bool ApplyToMouse(MouseSettings s)
+    bool saving;
+
+    // Grava em segundo plano; a janela continua respondendo enquanto isso.
+    void ApplyToMouse(MouseSettings s, Action onSuccess = null)
     {
-        Cursor = Cursors.WaitCursor; apply.Enabled = false;
-        Status("Gravando no mouse…", false); status.Refresh();
-        string err = App.ApplySettings(current, s);
-        Cursor = Cursors.Default; apply.Enabled = true;
-        if (err == null) { Status("O mouse não respondeu. Ele está ligado?", true); return false; }
-        if (err.Length > 0) { Status("Não gravou: " + err, true); return false; }
-        current = s;
-        Status("✓ Gravado e conferido no mouse.", false);
-        status.ForeColor = Theme.Good;
-        return true;
+        if (saving) return;
+        saving = true; apply.Enabled = false; UseWaitCursor = true;
+        Status("Gravando no mouse…", false);
+        App.InBackground(this, () => App.ApplySettings(current, s), err =>
+        {
+            saving = false; apply.Enabled = true; UseWaitCursor = false;
+            if (err == null) { Status("O mouse não respondeu. Mexa nele para acordar e tente de novo.", true); return; }
+            if (err.Length > 0) { Status("Não gravou: " + err, true); return; }
+            current = s;
+            Status("✓ Gravado e conferido no mouse.", false);
+            status.ForeColor = Theme.Good;
+            if (onSuccess != null) onSuccess();
+        });
+    }
+
+    // Lê de novo do mouse (útil depois de usar o botão de DPI ou o driver da Redragon).
+    void ReloadFromMouse()
+    {
+        if (saving) return;
+        saving = true; UseWaitCursor = true; Status("Lendo o mouse…", false);
+        App.InBackground(this, () => Mouse.With(m => MouseSettings.Read(m)), s =>
+        {
+            saving = false; UseWaitCursor = false;
+            if (s == null) { Status("O mouse não respondeu.", true); return; }
+            current = s;
+            levels.SelectedIndex = s.Levels - 1;
+            for (int i = 0; i < dpi.Length; i++) dpi[i].Value = s.Dpi[i];
+            UpdateLevels();
+            active.SelectedIndex = Math.Min(s.Active, s.Levels) - 1;
+            polling.SelectedIndex = Math.Max(0, Array.IndexOf(MouseSettings.PollingOptions, s.Polling));
+            lod.SelectedIndex = s.LodMm == 2 ? 1 : 0;
+            int pi = peakValues.IndexOf(s.PeakSeconds);
+            if (pi >= 0) peak.SelectedIndex = pi;
+            Status("Valores atualizados com o que está no mouse.", false);
+        });
+    }
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (keyData == Keys.Escape) { Close(); return true; }
+        return base.ProcessCmdKey(ref msg, keyData);
     }
 }

@@ -18,7 +18,10 @@ Testado no **Redragon M916 PRO 1K** (dongle 2.4G e cabo).
 - **Perfis do mouse:** salve combinações (ex.: "Jogo", "Trabalho") e troque com um clique pelo menu
 - **Cor do teclado Anne Pro 2** (pelo cabo USB): cores prontas ou qualquer cor, usando o comando descoberto pelo [Annemone](https://github.com/illixion/Annemone). Isso substitui a iluminação configurada no ObinsKit
 - Clique no ícone para abrir o **painel**: um cartão por dispositivo, com porcentagem, barra de bateria, voltagem, tempo restante estimado, conexão (cabo/dongle), polling rate e nível de DPI ativo
-- Visual no estilo do Windows 11, que segue o tema claro/escuro e a cor de destaque do sistema
+- Visual no estilo do Windows 11, que segue o tema claro/escuro e a cor de destaque do sistema (e acompanha quando você troca)
+- Aviso quando o mouse termina de carregar
+- Abrir o app de novo, com ele já rodando, mostra o painel
+- "Verificar atualizações" no menu compara com a última versão publicada aqui
 - Intervalo de atualização configurável: 5 s, 10 s, 30 s, 1 min ou 5 min
 - Opção "Iniciar com o Windows"
 - Funciona junto com o driver oficial da Redragon

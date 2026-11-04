@@ -10,8 +10,19 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
+using System.Diagnostics;
+using System.Net;
+using System.Reflection;
+using System.Text.RegularExpressions;
 using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
+
+[assembly: AssemblyTitle("Mouse Battery Redragon")]
+[assembly: AssemblyDescription("Bateria e configuração de mouses Redragon, teclado Anne Pro 2 e dispositivos Bluetooth")]
+[assembly: AssemblyProduct("Mouse Battery Redragon")]
+[assembly: AssemblyCopyright("MIT · github.com/PauloHCbelaine/redragon-mouse-battery")]
+[assembly: AssemblyVersion("1.5.0.0")]
+[assembly: AssemblyFileVersion("1.5.0.0")]
 
 static class Hid
 {
@@ -97,21 +108,26 @@ class Mouse : IDisposable
             {
                 fs.Write(req, 0, 17);
                 DateTime end = DateTime.Now.AddMilliseconds(400);
-                while (DateTime.Now < end)
+                while (true)
                 {
-                    var buf = new byte[17];
-                    IAsyncResult ar = fs.BeginRead(buf, 0, 17, null, null);
+                    // Uma leitura que ficou esperando na tentativa anterior continua valendo.
+                    if (pending == null) { pendingBuf = new byte[17]; pending = fs.BeginRead(pendingBuf, 0, 17, null, null); }
                     TimeSpan left = end - DateTime.Now;
-                    if (left < TimeSpan.Zero || !ar.AsyncWaitHandle.WaitOne(left)) return null; // fechar o handle cancela a leitura
-                    int n = fs.EndRead(ar);
+                    if (left <= TimeSpan.Zero || !pending.AsyncWaitHandle.WaitOne(left)) break; // sem resposta: tenta de novo
+                    int n = fs.EndRead(pending);
+                    byte[] buf = pendingBuf;
+                    pending = null;
                     if (n >= 17 && buf[0] == 0x08 && buf[1] == cmd && buf[2] == 0 &&
                         (cmd != 0x08 && cmd != 0x07 || (buf[3] == req[3] && buf[4] == req[4])))
                         return buf;
                 }
             }
         }
-        return null;
+        return null; // fechar o handle cancela a leitura que ficou pendente
     }
+
+    IAsyncResult pending;
+    byte[] pendingBuf;
 
     public byte[] ReadMem(int addr, int len)
     {
@@ -277,14 +293,17 @@ class MouseSettings
     // Aplica um perfil por cima das configurações atuais (mantém os bytes que o perfil não guarda).
     public MouseSettings WithProfile(string text)
     {
+        if (string.IsNullOrEmpty(text)) return null;
         var p = text.Split('|');
         if (p.Length < 6) return null;
         var s = Copy();
-        s.Polling = int.Parse(p[0]); s.Levels = int.Parse(p[1]); s.Active = int.Parse(p[2]);
-        s.LodMm = int.Parse(p[3]); s.PeakSeconds = int.Parse(p[4]);
+        if (!int.TryParse(p[0], out s.Polling) || !int.TryParse(p[1], out s.Levels) || !int.TryParse(p[2], out s.Active) ||
+            !int.TryParse(p[3], out s.LodMm) || !int.TryParse(p[4], out s.PeakSeconds)) return null;
         var d = p[5].Split(',');
-        for (int i = 0; i < d.Length && i < MaxLevels; i++) s.Dpi[i] = int.Parse(d[i]);
+        for (int i = 0; i < d.Length && i < MaxLevels; i++)
+            if (!int.TryParse(d[i], out s.Dpi[i]) || s.Dpi[i] < 50 || s.Dpi[i] > 26000) return null;
         if (s.Levels < 1 || s.Levels > MaxLevels || s.Active < 1 || s.Active > s.Levels) return null;
+        if (Array.IndexOf(PollingOptions, s.Polling) < 0 || (s.LodMm != 1 && s.LodMm != 2) || s.PeakSeconds < 10 || s.PeakSeconds > 2550) return null;
         return s;
     }
 }
@@ -444,7 +463,21 @@ class App : ApplicationContext
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     const string CfgKey = @"Software\MouseBatteryRedragon";
     const string AppName = "MouseBatteryRedragon";
+    const string ShowEventName = "MouseBatteryRedragon_ShowPanel";
+    const string RepoApi = "https://api.github.com/repos/PauloHCbelaine/redragon-mouse-battery/releases/latest";
     static readonly int[] Intervals = { 5, 10, 30, 60, 300 };
+    public static readonly Version AppVersion = Assembly.GetExecutingAssembly().GetName().Version;
+    public static string VersionText { get { return AppVersion.Major + "." + AppVersion.Minor + "." + AppVersion.Build; } }
+
+    public static void LogError(Exception e)
+    {
+        try
+        {
+            File.AppendAllText(Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "erros.log"),
+                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " v" + VersionText + " " + e + "\r\n\r\n");
+        }
+        catch { }
+    }
 
     NotifyIcon mouseTray = new NotifyIcon();
     System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
@@ -456,7 +489,7 @@ class App : ApplicationContext
     MouseReading mouse;
     bool mouseOnline;
     int mouseRealPct = -1; DateTime mouseRealTime; // último nível real (sem cabo)
-    bool warned20, warned10;
+    bool warned20, warned10, notifiedFull;
     DateTime dischargeStart; int dischargeStartPct = -1;
 
     // Bluetooth: um ícone por dispositivo escolhido.
@@ -507,13 +540,19 @@ class App : ApplicationContext
         startupItem = new ToolStripMenuItem("Iniciar com o Windows", null, delegate { ToggleStartup(); });
         startupItem.Checked = IsStartupEnabled();
         menu.Items.Add(startupItem);
+        menu.Items.Add("Verificar atualizações (v" + VersionText + ")", null, delegate { CheckUpdates(); });
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Sair", null, delegate
         {
+            SystemEvents.UserPreferenceChanged -= OnThemeChanged;
             mouseTray.Visible = false;
             foreach (var t in btTrays.Values) t.Visible = false;
             Application.Exit();
         });
+
+        FixStartupPath();
+        SystemEvents.UserPreferenceChanged += OnThemeChanged;
+        ListenForSecondLaunch();
 
         Attach(mouseTray);
         SetIcon(mouseTray, Icons.Mouse("…", Color.Gray, false), "Mouse: lendo…");
@@ -523,6 +562,73 @@ class App : ApplicationContext
         SetInterval(LoadInterval());
         RefreshMouse();
         RefreshBt();
+    }
+
+    // Trocou o tema claro/escuro ou a cor de destaque do Windows: o app acompanha.
+    void OnThemeChanged(object sender, UserPreferenceChangedEventArgs e)
+    {
+        if (e.Category != UserPreferenceCategory.General && e.Category != UserPreferenceCategory.Color) return;
+        try { ui.BeginInvoke((Action)delegate { Theme.Load(); menu.Invalidate(); }); } catch { }
+    }
+
+    // Abrir o .exe de novo com o app já rodando: a segunda cópia avisa esta, que abre o painel.
+    void ListenForSecondLaunch()
+    {
+        EventWaitHandle ev;
+        try { ev = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName); } catch { return; }
+        var t = new Thread(() =>
+        {
+            while (ev.WaitOne())
+                try { ui.BeginInvoke((Action)delegate { if (flyout == null || flyout.IsDisposed) ShowDetails(); }); } catch { }
+        });
+        t.IsBackground = true; t.Start();
+    }
+
+    // Se o .exe mudou de pasta, "Iniciar com o Windows" passa a apontar para o lugar novo.
+    static void FixStartupPath()
+    {
+        try
+        {
+            using (var k = Registry.CurrentUser.OpenSubKey(RunKey, true))
+            {
+                string want = "\"" + Application.ExecutablePath + "\"";
+                var cur = k == null ? null : k.GetValue(AppName) as string;
+                if (cur != null && !string.Equals(cur, want, StringComparison.OrdinalIgnoreCase)) k.SetValue(AppName, want);
+            }
+        }
+        catch { }
+    }
+
+    // Compara com a última versão publicada no GitHub (só quando o usuário pede).
+    void CheckUpdates()
+    {
+        InBackground(ui, () =>
+        {
+            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+            using (var wc = new WebClient())
+            {
+                wc.Headers[HttpRequestHeader.UserAgent] = "MouseBatteryRedragon/" + VersionText;
+                wc.Encoding = Encoding.UTF8;
+                return wc.DownloadString(RepoApi);
+            }
+        }, json =>
+        {
+            Match tag = json == null ? Match.Empty : Regex.Match(json, "\"tag_name\"\\s*:\\s*\"v?([0-9.]+)\"");
+            Match url = json == null ? Match.Empty : Regex.Match(json, "\"html_url\"\\s*:\\s*\"(https://github.com/[^\"]+/releases/tag/[^\"]+)\"");
+            Version latest;
+            if (!tag.Success || !Version.TryParse(tag.Groups[1].Value, out latest))
+            {
+                mouseTray.ShowBalloonTip(4000, "Atualizações", "Não consegui verificar agora. Confira a internet e tente de novo.", ToolTipIcon.Warning);
+                return;
+            }
+            if (latest > new Version(AppVersion.Major, AppVersion.Minor, AppVersion.Build))
+            {
+                if (MessageBox.Show("A versão " + latest + " está disponível (você usa a " + VersionText + ").\n\nAbrir a página de download?",
+                        "Atualização disponível", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes && url.Success)
+                    try { Process.Start(url.Groups[1].Value); } catch { }
+            }
+            else mouseTray.ShowBalloonTip(3000, "Atualizações", "Você já está na versão mais recente (" + VersionText + ").", ToolTipIcon.Info);
+        });
     }
 
     void Attach(NotifyIcon t)
@@ -543,19 +649,38 @@ class App : ApplicationContext
         });
     }
 
+    // Roda `work` fora da linha da interface (falar com o mouse pode levar alguns segundos)
+    // e entrega o resultado em `done` de volta na interface.
+    public static void InBackground<T>(System.Windows.Forms.Control owner, Func<T> work, Action<T> done)
+    {
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            T result = default(T);
+            try { result = work(); } catch (Exception e) { LogError(e); }
+            try { if (!owner.IsDisposed) owner.BeginInvoke((Action)delegate { done(result); }); } catch { }
+        });
+    }
+
+    bool openingSettings;
+
     void OpenSettings()
     {
         if (settingsForm != null && !settingsForm.IsDisposed) { settingsForm.Activate(); return; }
-        var s = Mouse.With(m => MouseSettings.Read(m));
-        if (s == null)
+        if (openingSettings) return;
+        openingSettings = true;
+        InBackground(ui, () => Mouse.With(m => MouseSettings.Read(m)), s =>
         {
-            MessageBox.Show("O mouse não respondeu. Ele está ligado e conectado (dongle ou cabo)?", "Configurar mouse",
-                MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-        settingsForm = new SettingsWindow(s);
-        settingsForm.FormClosed += delegate { RefreshMouse(); };
-        settingsForm.Show();
+            openingSettings = false;
+            if (s == null)
+            {
+                mouseTray.ShowBalloonTip(5000, "Configurar mouse", "O mouse não respondeu. Mexa nele para acordar e tente de novo.", ToolTipIcon.Warning);
+                return;
+            }
+            settingsForm = new SettingsWindow(s);
+            settingsForm.FormClosed += delegate { RefreshMouse(); };
+            settingsForm.Show();
+            settingsForm.Activate();
+        });
     }
 
     void BuildProfilesMenu()
@@ -573,17 +698,20 @@ class App : ApplicationContext
 
     void ApplyProfile(string name)
     {
-        string err = Mouse.With(m =>
+        string data = Profiles.Get(name);
+        InBackground(ui, () => Mouse.With(m =>
         {
             var now = MouseSettings.Read(m);
             if (now == null) return null;
-            var wanted = now.WithProfile(Profiles.Get(name));
-            return wanted == null ? "perfil inválido" : wanted.Apply(m, now);
+            var wanted = now.WithProfile(data);
+            return wanted == null ? "o perfil salvo está inválido" : wanted.Apply(m, now);
+        }), err =>
+        {
+            if (err == null) mouseTray.ShowBalloonTip(5000, "Perfil não aplicado", "O mouse não respondeu. Mexa nele para acordar e tente de novo.", ToolTipIcon.Warning);
+            else if (err.Length > 0) mouseTray.ShowBalloonTip(5000, "Perfil \"" + name + "\" com problema", "Não gravou: " + err, ToolTipIcon.Warning);
+            else mouseTray.ShowBalloonTip(3000, "Perfil \"" + name + "\" aplicado", "Configurações gravadas no mouse.", ToolTipIcon.Info);
+            RefreshMouse();
         });
-        if (err == null) mouseTray.ShowBalloonTip(5000, "Perfil não aplicado", "O mouse não respondeu.", ToolTipIcon.Warning);
-        else if (err.Length > 0) mouseTray.ShowBalloonTip(5000, "Perfil aplicado em parte", "Falhou: " + err, ToolTipIcon.Warning);
-        else mouseTray.ShowBalloonTip(3000, "Perfil \"" + name + "\" aplicado", "Configurações gravadas no mouse.", ToolTipIcon.Info);
-        RefreshMouse();
     }
 
     // ---------- cor do teclado ----------
@@ -719,14 +847,24 @@ class App : ApplicationContext
             SetIcon(mouseTray, Icons.Mouse("?", Color.Gray, false), "Mouse desligado/dormindo" + old);
             return;
         }
+        // Abriu o app com o mouse já carregado no cabo: não precisa avisar.
+        if (mouse == null && r.Charging && r.Percent >= 100) notifiedFull = true;
         mouse = r;
         string when = DateTime.Now.ToString("HH:mm:ss");
 
+        if (!r.Charging) notifiedFull = false;
         if (r.Charging)
         {
             dischargeStartPct = -1; warned20 = warned10 = false;
             if (r.Percent >= 100)
+            {
                 SetIcon(mouseTray, Icons.Mouse("F", Color.DeepSkyBlue, false), "Mouse: carregado\n" + when);
+                if (!notifiedFull)
+                {
+                    notifiedFull = true;
+                    mouseTray.ShowBalloonTip(5000, "Mouse carregado", "A bateria chegou a 100%. Já pode tirar o cabo.", ToolTipIcon.Info);
+                }
+            }
             else
                 SetIcon(mouseTray, Icons.Mouse(mouseRealPct >= 0 ? mouseRealPct.ToString() : "", Color.DeepSkyBlue, true),
                     "Mouse carregando" + (mouseRealPct >= 0 ? " (antes: " + mouseRealPct + "%)" : "") + "\n" + when);
@@ -821,7 +959,7 @@ class App : ApplicationContext
             {
                 m.Percent = mouse.Percent;
                 string rem = Remaining();
-                m.Status = rem == null ? "Em uso" : rem.StartsWith("~") ? rem + " restantes" : "Tempo restante: " + rem;
+                m.Status = rem == null ? "Em uso" : rem.StartsWith("~") ? rem + " restantes" : "Calculando o tempo restante…";
             }
             var parts = new List<string> { mouse.Wired ? "Cabo USB" : "Dongle 2.4G" };
             if (mouse.PollingHz > 0) parts.Add(mouse.PollingHz + " Hz");
@@ -953,21 +1091,20 @@ class App : ApplicationContext
                 s == null ? "sem leitura" : s.Serialize() + " | todos: " + string.Join(",", Array.ConvertAll(s.Dpi, x => x.ToString())));
             return;
         }
+        if (args.Length > 1 && args[0] == "--make-icon") { Icons.WriteAppIcon(args[1]); return; }
         bool isNew;
         using (new Mutex(true, AppName, out isNew))
         {
-            if (!isNew) return; // já está rodando
-            // Erro inesperado na interface: registra em erros.log e segue funcionando, sem janela de erro.
-            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
-            Application.ThreadException += (s, e) =>
+            if (!isNew)
             {
-                try
-                {
-                    File.AppendAllText(Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "erros.log"),
-                        DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " " + e.Exception + "\r\n\r\n");
-                }
-                catch { }
-            };
+                // Já está rodando: pede para a cópia aberta mostrar o painel.
+                try { using (var ev = EventWaitHandle.OpenExisting(ShowEventName)) ev.Set(); } catch { }
+                return;
+            }
+            // Erro inesperado: registra em erros.log e segue funcionando, sem janela de erro.
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (s, e) => LogError(e.Exception);
+            AppDomain.CurrentDomain.UnhandledException += (s, e) => { var ex = e.ExceptionObject as Exception; if (ex != null) LogError(ex); };
             Application.EnableVisualStyles();
             Application.Run(new App());
         }
@@ -983,6 +1120,59 @@ static class Icons
     public static Icon Bluetooth(string text, Color color, bool charging) { return Make(Draw(text, color, charging, true)); }
 
     static Icon Make(Bitmap bmp) { using (bmp) return Icon.FromHandle(bmp.GetHicon()); }
+
+    // Ícone do .exe: quadrado arredondado azul com um mouse e uma barra de bateria.
+    static Bitmap AppIcon(int s)
+    {
+        var bmp = new Bitmap(s, s);
+        using (var g = Graphics.FromImage(bmp))
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            g.Clear(Color.Transparent);
+            var r = new RectangleF(s * 0.04f, s * 0.04f, s * 0.92f, s * 0.92f);
+            using (var path = Theme.Round(r, s * 0.22f))
+            using (var grad = new LinearGradientBrush(r, Color.FromArgb(0, 120, 212), Color.FromArgb(0, 70, 160), 90f))
+                g.FillPath(grad, path);
+            // Corpo do mouse
+            var body = new RectangleF(s * 0.30f, s * 0.14f, s * 0.40f, s * 0.56f);
+            using (var path = Theme.Round(body, s * 0.20f)) using (var w = new SolidBrush(Color.White)) g.FillPath(w, path);
+            using (var pen = new Pen(Color.FromArgb(0, 95, 190), Math.Max(1, s * 0.035f)))
+            {
+                g.DrawLine(pen, s * 0.50f, s * 0.15f, s * 0.50f, s * 0.36f);
+                g.DrawLine(pen, s * 0.31f, s * 0.36f, s * 0.69f, s * 0.36f);
+            }
+            // Barra de bateria embaixo
+            var track = new RectangleF(s * 0.20f, s * 0.77f, s * 0.60f, Math.Max(2, s * 0.09f));
+            using (var path = Theme.Round(track, track.Height / 2)) using (var b = new SolidBrush(Color.FromArgb(90, 255, 255, 255))) g.FillPath(b, path);
+            using (var path = Theme.Round(new RectangleF(track.X, track.Y, track.Width * 0.72f, track.Height), track.Height / 2))
+            using (var b = new SolidBrush(Color.FromArgb(76, 215, 110))) g.FillPath(b, path);
+        }
+        return bmp;
+    }
+
+    // Grava um .ico com vários tamanhos (PNG dentro do ICO, aceito desde o Windows Vista).
+    public static void WriteAppIcon(string file)
+    {
+        int[] sizes = { 16, 24, 32, 48, 64, 256 };
+        var pngs = new List<byte[]>();
+        foreach (int s in sizes)
+            using (var bmp = AppIcon(s)) using (var ms = new MemoryStream()) { bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png); pngs.Add(ms.ToArray()); }
+        using (var fs = File.Create(file))
+        using (var w = new BinaryWriter(fs))
+        {
+            w.Write((short)0); w.Write((short)1); w.Write((short)sizes.Length);
+            int offset = 6 + 16 * sizes.Length;
+            for (int i = 0; i < sizes.Length; i++)
+            {
+                w.Write((byte)(sizes[i] >= 256 ? 0 : sizes[i])); w.Write((byte)(sizes[i] >= 256 ? 0 : sizes[i]));
+                w.Write((byte)0); w.Write((byte)0); w.Write((short)1); w.Write((short)32);
+                w.Write(pngs[i].Length); w.Write(offset);
+                offset += pngs[i].Length;
+            }
+            foreach (var p in pngs) w.Write(p);
+        }
+    }
 
     static Bitmap Draw(string text, Color color, bool charging, bool barTop)
     {
