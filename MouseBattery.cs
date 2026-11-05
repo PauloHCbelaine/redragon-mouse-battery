@@ -22,8 +22,8 @@ using Microsoft.Win32.SafeHandles;
 [assembly: AssemblyDescription("Bateria e configuração de mouses Redragon, teclado Anne Pro 2 e dispositivos Bluetooth")]
 [assembly: AssemblyProduct("Mouse Battery Redragon")]
 [assembly: AssemblyCopyright("MIT · github.com/PauloHCbelaine/redragon-mouse-battery")]
-[assembly: AssemblyVersion("1.8.1.0")]
-[assembly: AssemblyFileVersion("1.8.1.0")]
+[assembly: AssemblyVersion("1.8.2.0")]
+[assembly: AssemblyFileVersion("1.8.2.0")]
 
 static class Hid
 {
@@ -519,7 +519,7 @@ class Drain
     const double MaxGapHours = 10.0 / 60; // intervalo maior que isso entre leituras = PC estava suspenso
     const double SampleHours = 2.0 / 60;  // uma amostra a cada 2 min de uso
     const double MinSpanHours = 1;        // medição mínima antes de estimar
-    const double MinDrop = 1.5;           // queda mínima na reta, em pontos
+    const double MinT = 4;                // a queda tem que ser 4x maior que a incerteza da reta
     const int MaxSamples = 400;
 
     string name;
@@ -549,6 +549,7 @@ class Drain
                         string[] p = s.Split(':');
                         if (p.Length == 2) samples.Add(new[] { Num(p[0], 0), Num(p[1], 0) });
                     }
+                    if (samples.Count > 0) Fit(); // já mostra a estimativa ao abrir o app
                 }
         }
         catch { }
@@ -603,7 +604,7 @@ class Drain
     {
         int n = samples.Count;
         double span = samples[n - 1][0] - samples[0][0];
-        if (n < 5 || span < MinSpanHours) return;
+        if (n < 10 || span < MinSpanHours) return;
         double mx = 0, my = 0;
         foreach (var s in samples) { mx += s[0]; my += s[1]; }
         mx /= n; my /= n;
@@ -611,7 +612,13 @@ class Drain
         foreach (var s in samples) { sxy += (s[0] - mx) * (s[1] - my); sxx += (s[0] - mx) * (s[0] - mx); }
         if (sxx <= 0) return;
         double slope = sxy / sxx;
-        if (slope >= 0 || -slope * span < MinDrop) return;
+        if (slope >= 0) return;
+        // Em vez de esperar uma queda mínima (o mouse gasta tão pouco que leva horas para cair 1 ponto),
+        // confere se a tendência é clara: a inclinação precisa ser bem maior que a incerteza dela.
+        double sse = 0;
+        foreach (var s in samples) { double r = s[1] - (my + slope * (s[0] - mx)); sse += r * r; }
+        double err = Math.Sqrt(sse / (n - 2) / sxx);
+        if (err > 0 && -slope / err < MinT) return;
         perPct = -1 / slope;
     }
 
