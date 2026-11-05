@@ -22,8 +22,8 @@ using Microsoft.Win32.SafeHandles;
 [assembly: AssemblyDescription("Bateria e configuração de mouses Redragon, teclado Anne Pro 2 e dispositivos Bluetooth")]
 [assembly: AssemblyProduct("Mouse Battery Redragon")]
 [assembly: AssemblyCopyright("MIT · github.com/PauloHCbelaine/redragon-mouse-battery")]
-[assembly: AssemblyVersion("1.8.0.0")]
-[assembly: AssemblyFileVersion("1.8.0.0")]
+[assembly: AssemblyVersion("1.8.1.0")]
+[assembly: AssemblyFileVersion("1.8.1.0")]
 
 static class Hid
 {
@@ -457,13 +457,18 @@ static class AnnePro
     static string Ver(byte major, byte minor) { return major + "." + minor.ToString("00"); }
 
     // Tabela de voltagem para % do ObinsKit.
-    static int Percent(double v)
+    static int Percent(double v) { return (int)Math.Round(v >= 4.1 ? 100 : v >= 4.0 ? 90 + (v - 4.0) / .15 * 10 : VoltPct(v)); }
+
+    // A mesma tabela, com casas decimais e indo até 4,20 V (bateria de lítio cheia), para medir a duração:
+    // a do ObinsKit já marca 100 em 4,10 V, e o mouse passa horas acima disso.
+    // Serve para qualquer bateria de lítio de uma célula, como a do mouse.
+    public static double VoltPct(double v)
     {
-        double p = v >= 4.1 ? 100 : v >= 4.0 ? 90 + (v - 4.0) / .15 * 10 : v >= 3.9 ? 80 + (v - 3.9) / .1 * 10 :
+        double p = v >= 4.2 ? 100 : v >= 4.0 ? 90 + (v - 4.0) / .2 * 10 : v >= 3.9 ? 80 + (v - 3.9) / .1 * 10 :
                    v >= 3.8 ? 70 + (v - 3.8) / .1 * 10 : v >= 3.75 ? 60 + (v - 3.75) / .05 * 10 : v >= 3.7 ? 50 + (v - 3.7) / .05 * 10 :
                    v >= 3.65 ? 40 + (v - 3.65) / .05 * 10 : v >= 3.6 ? 30 + (v - 3.6) / .05 * 10 : v >= 3.5 ? 20 + (v - 3.5) / .1 * 10 :
                    v >= 3.4 ? 10 + (v - 3.4) / .1 * 10 : 0;
-        return (int)Math.Round(p);
+        return p;
     }
 
     // As respostas pelo Bluetooth às vezes se perdem: tenta duas vezes.
@@ -503,24 +508,31 @@ static class AnnePro
 
 // Estimativa de duração da bateria, uma por dispositivo.
 // Conta só o tempo em que o dispositivo esteve conectado com o PC ligado (o app aberto): PC desligado ou
-// em suspensão não entra na conta. Fica guardada no registro, então vale depois de reiniciar, e a taxa
-// medida numa descarga continua valendo na próxima até ela ter caído o bastante para medir de novo.
+// em suspensão não entra na conta. Guarda uma leitura a cada 2 min de uso e traça a reta que melhor passa
+// por elas (mínimos quadrados): assim a oscilação de cada leitura se anula e a estimativa sai em ~1 h,
+// sem esperar o % cair 5 pontos. Para o mouse e o Anne Pro 2 o % vem da voltagem, que muda aos poucos
+// (o % que o mouse informa fica parado em 100 por horas). Tudo fica no registro: vale depois de
+// reiniciar, e a taxa de uma descarga continua valendo na próxima até ela ter dados para medir de novo.
 class Drain
 {
     const string Root = @"Software\MouseBatteryRedragon\Drain";
-    const int MinDrop = 5;          // pontos de queda para medir (com menos, o erro do % inteiro pesa demais)
     const double MaxGapHours = 10.0 / 60; // intervalo maior que isso entre leituras = PC estava suspenso
+    const double SampleHours = 2.0 / 60;  // uma amostra a cada 2 min de uso
+    const double MinSpanHours = 1;        // medição mínima antes de estimar
+    const double MinDrop = 1.5;           // queda mínima na reta, em pontos
+    const int MaxSamples = 400;
 
     string name;
-    int rise;                       // subida que conta como "carregou"
+    double rise;                    // subida que conta como "carregou"
     double hours;                   // horas conectado, acumuladas desde sempre
-    int startPct = -1, lastPct = -1; double startHours;
+    double low = -1, last = -1;     // menor % e último % da descarga atual
+    List<double[]> samples = new List<double[]>(); // [horas, %] da descarga atual
     double perPct = -1;             // horas por ponto de bateria, da última medição boa
     DateTime lastTick, lastSave;
 
-    // `rise`: quanto o % precisa subir para valer como recarga. Para % calculado pela voltagem (Anne Pro 2)
-    // ele é maior, porque a voltagem sobe um pouco sozinha quando a luz do teclado apaga.
-    public Drain(string name, int rise)
+    // `rise`: quanto o % precisa subir para valer como recarga. Para % calculado pela voltagem ele é
+    // maior, porque a voltagem sobe um pouco sozinha quando o aparelho para de gastar (luz apaga, mouse dorme).
+    public Drain(string name, double rise)
     {
         this.rise = rise;
         this.name = Regex.Replace(name, "[^A-Za-z0-9_&-]", "_");
@@ -529,9 +541,14 @@ class Drain
             using (var k = Registry.CurrentUser.OpenSubKey(Root + "\\" + this.name))
                 if (k != null)
                 {
-                    hours = Num(k.GetValue("Hours"), 0); startHours = Num(k.GetValue("StartHours"), 0);
+                    hours = Num(k.GetValue("Hours"), 0);
                     perPct = Num(k.GetValue("PerPct"), -1);
-                    startPct = (int)Num(k.GetValue("StartPct"), -1); lastPct = (int)Num(k.GetValue("LastPct"), -1);
+                    low = Num(k.GetValue("Low"), -1); last = Num(k.GetValue("Last"), -1);
+                    foreach (string s in (k.GetValue("Samples") as string ?? "").Split(';'))
+                    {
+                        string[] p = s.Split(':');
+                        if (p.Length == 2) samples.Add(new[] { Num(p[0], 0), Num(p[1], 0) });
+                    }
                 }
         }
         catch { }
@@ -555,22 +572,54 @@ class Drain
         if ((now - lastSave).TotalMinutes >= 5) Save();
     }
 
-    // Uma leitura de bateria. Carregando, ou subiu bastante (carregou longe do app): começa outra descarga.
-    public void Reading(int pct, bool charging)
+    // Uma leitura de bateria (pode ter casas decimais). Carregando, ou subiu bastante (carregou longe do
+    // app): começa outra descarga. Cheio (100) não entra, porque aí o % ainda não começou a cair.
+    public void Reading(double pct, bool charging)
     {
         if (pct < 0) return;
-        if (charging) { if (startPct >= 0) { startPct = lastPct = -1; Save(); } return; }
-        if (startPct < 0 || pct >= lastPct + rise) { startPct = lastPct = pct; startHours = hours; Save(); return; }
-        if (pct >= lastPct) return;
-        lastPct = pct;
-        double elapsed = hours - startHours;
-        // Meia hora no mínimo, para uma queda de voltagem momentânea não virar taxa.
-        if (startPct - pct >= MinDrop && elapsed >= 0.5) perPct = elapsed / (startPct - pct);
+        last = pct;
+        if (charging || pct >= 99.5) { if (samples.Count > 0) { samples.Clear(); low = -1; Save(); } return; }
+        if (samples.Count == 0 || pct >= low + rise) { samples.Clear(); low = pct; Add(pct); return; }
+        low = Math.Min(low, pct);
+        if (hours - samples[samples.Count - 1][0] < SampleHours) return;
+        Add(pct);
+        Fit();
+    }
+
+    void Add(double pct)
+    {
+        samples.Add(new[] { hours, pct });
+        if (samples.Count > MaxSamples) // fica com uma a cada duas, mantendo a primeira
+        {
+            var keep = new List<double[]>();
+            for (int i = 0; i < samples.Count; i += 2) keep.Add(samples[i]);
+            samples = keep;
+        }
         Save();
     }
 
-    // Horas de uso restantes, ou -1 se ainda não deu para medir.
-    public double HoursLeft(int pct) { return perPct > 0 && pct >= 0 ? perPct * pct : -1; }
+    // Reta de mínimos quadrados: inclinação = pontos por hora (negativa quando descarrega).
+    void Fit()
+    {
+        int n = samples.Count;
+        double span = samples[n - 1][0] - samples[0][0];
+        if (n < 5 || span < MinSpanHours) return;
+        double mx = 0, my = 0;
+        foreach (var s in samples) { mx += s[0]; my += s[1]; }
+        mx /= n; my /= n;
+        double sxy = 0, sxx = 0;
+        foreach (var s in samples) { sxy += (s[0] - mx) * (s[1] - my); sxx += (s[0] - mx) * (s[0] - mx); }
+        if (sxx <= 0) return;
+        double slope = sxy / sxx;
+        if (slope >= 0 || -slope * span < MinDrop) return;
+        perPct = -1 / slope;
+    }
+
+    // Horas de uso restantes com o % mais recente, ou -1 se ainda não deu para medir.
+    public double HoursLeft() { return perPct > 0 && last >= 0 ? perPct * last : -1; }
+
+    // Quanto tempo de uso a descarga atual já tem (para mostrar o progresso da medição).
+    public double MeasuredHours { get { return samples.Count > 0 ? hours - samples[0][0] : 0; } }
 
     public static string Text(double h)
     {
@@ -584,13 +633,17 @@ class Drain
         lastSave = DateTime.Now;
         try
         {
+            var sb = new StringBuilder();
+            foreach (var s in samples)
+                sb.Append(s[0].ToString("0.####", CultureInfo.InvariantCulture)).Append(':').Append(s[1].ToString("0.##", CultureInfo.InvariantCulture)).Append(';');
             using (var k = Registry.CurrentUser.CreateSubKey(Root + "\\" + name))
             {
                 k.SetValue("Hours", hours.ToString("R", CultureInfo.InvariantCulture));
-                k.SetValue("StartHours", startHours.ToString("R", CultureInfo.InvariantCulture));
                 k.SetValue("PerPct", perPct.ToString("R", CultureInfo.InvariantCulture));
-                k.SetValue("StartPct", startPct.ToString(CultureInfo.InvariantCulture));
-                k.SetValue("LastPct", lastPct.ToString(CultureInfo.InvariantCulture));
+                k.SetValue("Low", low.ToString("R", CultureInfo.InvariantCulture));
+                k.SetValue("Last", last.ToString("R", CultureInfo.InvariantCulture));
+                k.SetValue("Samples", sb.ToString());
+                foreach (string old in new[] { "StartHours", "StartPct", "LastPct" }) k.DeleteValue(old, false);
             }
         }
         catch { }
@@ -721,10 +774,10 @@ class App : ApplicationContext
     bool mouseOnline;
     int mouseRealPct = -1; DateTime mouseRealTime; // último nível real (sem cabo)
     bool warned20, warned10, notifiedFull;
-    Drain mouseDrain = new Drain("mouse", 5);
+    Drain mouseDrain = new Drain("mouse", 15);
     Dictionary<string, Drain> drains = new Dictionary<string, Drain>();
 
-    Drain DrainFor(string key, int rise)
+    Drain DrainFor(string key, double rise)
     {
         Drain d;
         if (!drains.TryGetValue(key, out d)) drains[key] = d = new Drain(key, rise);
@@ -1161,7 +1214,7 @@ class App : ApplicationContext
                 anne = r;
                 if (freshBattery && r.Mac != null)
                 {
-                    DrainFor("anne_" + r.Mac, 15).Reading(r.Percent, false);
+                    DrainFor("anne_" + r.Mac, 15).Reading(AnnePro.VoltPct(r.MilliVolts / 1000.0), false);
                     Save("AnneLast", r.Mac + ";" + r.Percent + ";" + r.MilliVolts + ";" + r.BatteryTime.Ticks);
                 }
                 // Acordado: confere de novo em 5 min (perguntar sempre poderia impedir o teclado de dormir).
@@ -1342,7 +1395,7 @@ class App : ApplicationContext
         string when = DateTime.Now.ToString("HH:mm:ss");
 
         if (!r.Charging) notifiedFull = false;
-        mouseDrain.Reading(r.Percent, r.Charging);
+        mouseDrain.Reading(r.MilliVolts > 3000 && r.MilliVolts < 4500 ? AnnePro.VoltPct(r.MilliVolts / 1000.0) : r.Percent, r.Charging);
         if (r.Charging)
         {
             warned20 = warned10 = false;
@@ -1365,7 +1418,7 @@ class App : ApplicationContext
         Save("MouseLastPct", r.Percent);
         Save("MouseLastTime", r.Time.Ticks.ToString());
 
-        string rem = Drain.Text(mouseDrain.HoursLeft(r.Percent));
+        string rem = Drain.Text(mouseDrain.HoursLeft());
         SetIcon(mouseTray, Icons.Mouse(r.Percent >= 100 ? "F" : r.Percent.ToString(), LevelColor(r.Percent), false),
             "Mouse: " + r.Percent + "%" + (rem != null ? " · " + rem : "") + "\n" + (r.Wired ? "Cabo" : "Dongle 2.4G") + " · " + when);
 
@@ -1387,8 +1440,12 @@ class App : ApplicationContext
     // Texto da estimativa para o card (null enquanto carrega).
     static string Remaining(Drain d, int pct)
     {
-        string t = Drain.Text(d.HoursLeft(pct));
-        return t != null ? t + " restantes" : pct >= 0 ? "medindo a duração" : null;
+        string t = Drain.Text(d.HoursLeft());
+        if (t != null) return t + " restantes";
+        if (pct < 0) return null;
+        // Mostra quanto falta para a primeira estimativa (precisa de ~1 h de uso medido).
+        double m = d.MeasuredHours;
+        return m > 0 && m < 1 ? "medindo a duração · falta ~" + Math.Max(5, (int)Math.Ceiling((1 - m) * 12) * 5) + " min" : "medindo a duração";
     }
 
     // ---------- detalhes ----------
